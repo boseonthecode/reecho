@@ -1,0 +1,53 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+  "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="org.reecho.Service">
+    <method name="GetState">
+      <arg name="state" type="s" direction="out"/>
+    </method>
+    <method name="Activate">
+      <arg name="ssid" type="s" direction="in"/>
+      <arg name="password" type="s" direction="in"/>
+      <arg name="band" type="s" direction="in"/>
+    </method>
+    <method name="Deactivate"/>
+    <method name="GetDevices">
+      <arg name="devices" type="a(ssssddd)" direction="out"/>
+    </method>
+    <method name="BlacklistDevice">
+      <arg name="mac" type="s" direction="in"/>
+    </method>
+    <method name="UnblacklistDevice">
+      <arg name="mac" type="s" direction="in"/>
+    </method>
+    <method name="GetDataUsage">
+      <arg name="rx" type="t" direction="out"/>
+      <arg name="tx" type="t" direction="out"/>
+      <arg name="limit" type="t" direction="out"/>
+    </method>
+    <method name="SetDataLimit">
+      <arg name="bytes" type="t" direction="in"/>
+    </method>
+    <method name="GetConfig">
+      <arg name="ssid" type="s" direction="out"/>
+      <arg name="password" type="s" direction="out"/>
+      <arg name="band" type="s" direction="out"/>
+    </method>
+    <method name="SetConfig">
+      <arg name="ssid" type="s" direction="in"/>
+      <arg name="password" type="s" direction="in"/>
+      <arg name="band" type="s" direction="in"/>
+    </method>
+    <signal name="StateChanged">
+      <arg name="state" type="s"/>
+    </signal>
+    <signal name="DeviceConnected">
+      <arg name="mac" type="s"/>
+      <arg name="name" type="s"/>
+    </signal>
+    <signal name="DeviceDisconnected">
+      <arg name="mac" type="s"/>
+    </signal>
+    <signal name="DataLimitReached"/>
+  </interface>
+</node>
