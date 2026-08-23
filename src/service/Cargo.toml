@@ -7,3 +7,8 @@ description = "Reecho background service — hotspot lifecycle, NetworkManager/h
 
 [dependencies]
 reecho-shared = { path = "../shared" }
+zbus = { version = "5", features = ["tokio", "bus-impl"] }
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
