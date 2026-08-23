@@ -7,3 +7,4 @@ description = "Reecho command-line interface"
 
 [dependencies]
 reecho-shared = { path = "../shared" }
+clap = { version = "4", features = ["derive"] }
