@@ -1,0 +1,9 @@
+[package]
+name = "reecho-service"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Reecho background service — hotspot lifecycle, NetworkManager/hostapd orchestration"
+
+[dependencies]
+reecho-shared = { path = "../shared" }

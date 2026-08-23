@@ -1,0 +1,3 @@
+[workspace]
+members = ["src/service", "src/cli", "src/shared"]
+resolver = "2"

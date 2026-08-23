@@ -1,0 +1,9 @@
+[package]
+name = "reecho-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Reecho command-line interface"
+
+[dependencies]
+reecho-shared = { path = "../shared" }

@@ -1,0 +1,6 @@
+[package]
+name = "reecho-shared"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Shared types and D-Bus interface definitions for Reecho"
