@@ -69,9 +69,8 @@ impl Config {
     pub fn save(&self) -> Result<(), ServiceError> {
         let path = config_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                ServiceError::Config(format!("failed to create config dir: {e}"))
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|e| ServiceError::Config(format!("failed to create config dir: {e}")))?;
         }
         let contents = toml::to_string_pretty(self)
             .map_err(|e| ServiceError::Config(format!("failed to serialize config: {e}")))?;

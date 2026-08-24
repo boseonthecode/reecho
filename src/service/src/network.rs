@@ -66,16 +66,11 @@ pub trait NetworkManagerOps {
     async fn get_active_connections(&self) -> Result<Vec<String>, NetworkError>;
 
     /// Get the connection state for an active connection.
-    async fn get_active_connection_state(
-        &self,
-        active_path: &str,
-    ) -> Result<u32, NetworkError>;
+    async fn get_active_connection_state(&self, active_path: &str) -> Result<u32, NetworkError>;
 
     /// Get the device object path for an active connection.
-    async fn get_active_connection_device(
-        &self,
-        active_path: &str,
-    ) -> Result<String, NetworkError>;
+    async fn get_active_connection_device(&self, active_path: &str)
+    -> Result<String, NetworkError>;
 
     /// Get the access point paths for a wireless device.
     async fn get_access_points(&self, device_path: &str) -> Result<Vec<String>, NetworkError>;
@@ -222,10 +217,7 @@ impl NetworkManagerOps for NetworkManagerClient {
         Ok(active_conns)
     }
 
-    async fn get_active_connection_state(
-        &self,
-        active_path: &str,
-    ) -> Result<u32, NetworkError> {
+    async fn get_active_connection_state(&self, active_path: &str) -> Result<u32, NetworkError> {
         let proxy = zbus::Proxy::new(
             &self.connection,
             NM_NAME,
@@ -238,10 +230,7 @@ impl NetworkManagerOps for NetworkManagerClient {
         let state: u32 = proxy
             .call_method(
                 "Get",
-                &(
-                    "org.freedesktop.NetworkManager.Connection.Active",
-                    "State",
-                ),
+                &("org.freedesktop.NetworkManager.Connection.Active", "State"),
             )
             .await
             .map_err(|e| NetworkError::Dbus(e.to_string()))?
@@ -340,10 +329,7 @@ impl NetworkManagerOps for NetworkManagerClient {
         let strength: u8 = proxy
             .call_method(
                 "Get",
-                &(
-                    "org.freedesktop.NetworkManager.AccessPoint",
-                    "Strength",
-                ),
+                &("org.freedesktop.NetworkManager.AccessPoint", "Strength"),
             )
             .await
             .map_err(|e| NetworkError::Dbus(e.to_string()))?
@@ -454,9 +440,7 @@ impl CommandRunner for RealCommandRunner {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(NetworkError::Parse(format!(
-                "{command} failed: {stderr}"
-            )));
+            return Err(NetworkError::Parse(format!("{command} failed: {stderr}")));
         }
 
         String::from_utf8(output.stdout)
@@ -567,7 +551,8 @@ pub struct ApStaResult {
 /// Connection settings represented as a nested string map.
 /// Outer key: setting section (e.g., "connection", "802-11-wireless").
 /// Inner key: setting name, value: setting value.
-pub type ConnectionSettings = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
+pub type ConnectionSettings =
+    std::collections::HashMap<String, std::collections::HashMap<String, String>>;
 
 /// Trait for NetworkManager connection operations, allowing mocking.
 #[async_trait::async_trait]
@@ -582,16 +567,11 @@ pub trait NetworkManagerConnectionOps {
     ) -> Result<String, NetworkError>;
 
     /// Deactivate a connection.
-    async fn deactivate_connection(
-        &self,
-        active_connection_path: &str,
-    ) -> Result<(), NetworkError>;
+    async fn deactivate_connection(&self, active_connection_path: &str)
+    -> Result<(), NetworkError>;
 
     /// Delete a connection profile.
-    async fn delete_connection(
-        &self,
-        connection_path: &str,
-    ) -> Result<(), NetworkError>;
+    async fn delete_connection(&self, connection_path: &str) -> Result<(), NetworkError>;
 
     /// Get the connection profile path from an active connection.
     async fn get_connection_profile(
@@ -682,9 +662,7 @@ pub async fn deactivate_ap_sta(
     active_connection_path: &str,
 ) -> Result<(), NetworkError> {
     nm.deactivate_connection(active_connection_path).await?;
-    let profile_path = nm
-        .get_connection_profile(active_connection_path)
-        .await?;
+    let profile_path = nm.get_connection_profile(active_connection_path).await?;
     nm.delete_connection(&profile_path).await?;
     Ok(())
 }
@@ -749,8 +727,7 @@ impl MockCommandRunner {
     }
 
     pub fn add_output(&mut self, key: &str, output: &str) {
-        self.outputs
-            .insert(key.to_string(), output.to_string());
+        self.outputs.insert(key.to_string(), output.to_string());
     }
 }
 
@@ -792,8 +769,7 @@ impl MockNetworkManager {
 
     pub fn add_wifi_device(&mut self, path: &str, interface: &str) {
         self.devices.push(path.to_string());
-        self.device_types
-            .insert(path.to_string(), DEVICE_TYPE_WIFI);
+        self.device_types.insert(path.to_string(), DEVICE_TYPE_WIFI);
         self.device_interfaces
             .insert(path.to_string(), interface.to_string());
     }
@@ -806,21 +782,14 @@ impl MockNetworkManager {
             .or_default();
     }
 
-    pub fn add_access_point(
-        &mut self,
-        device_path: &str,
-        ap_path: &str,
-        ssid: &str,
-        strength: u8,
-    ) {
+    pub fn add_access_point(&mut self, device_path: &str, ap_path: &str, ssid: &str, strength: u8) {
         self.access_points
             .entry(device_path.to_string())
             .or_default()
             .push(ap_path.to_string());
         self.ap_ssids
             .insert(ap_path.to_string(), ssid.as_bytes().to_vec());
-        self.ap_strengths
-            .insert(ap_path.to_string(), strength);
+        self.ap_strengths.insert(ap_path.to_string(), strength);
     }
 }
 
@@ -848,16 +817,11 @@ impl NetworkManagerOps for MockNetworkManager {
         Ok(self.active_connections.clone())
     }
 
-    async fn get_active_connection_state(
-        &self,
-        active_path: &str,
-    ) -> Result<u32, NetworkError> {
+    async fn get_active_connection_state(&self, active_path: &str) -> Result<u32, NetworkError> {
         self.connection_states
             .get(active_path)
             .copied()
-            .ok_or_else(|| {
-                NetworkError::Parse(format!("unknown active connection: {active_path}"))
-            })
+            .ok_or_else(|| NetworkError::Parse(format!("unknown active connection: {active_path}")))
     }
 
     async fn get_active_connection_device(
@@ -1048,7 +1012,10 @@ mod tests {
     #[tokio::test]
     async fn check_ap_sta_capability_with_mock() {
         let mut mock = MockCommandRunner::new();
-        mock.add_output("iw", "Wiphy phy0\nvalid interface combinations:\n * { AP }, #{ managed } <= 1, total <= 2\n");
+        mock.add_output(
+            "iw",
+            "Wiphy phy0\nvalid interface combinations:\n * { AP }, #{ managed } <= 1, total <= 2\n",
+        );
 
         let result = check_ap_sta_capability(&mock).await.unwrap();
         assert!(result.supported);
@@ -1058,7 +1025,10 @@ mod tests {
     #[tokio::test]
     async fn check_ap_sta_capability_not_supported() {
         let mut mock = MockCommandRunner::new();
-        mock.add_output("iw", "Wiphy phy0\nvalid interface combinations:\n * #{ managed } <= 1\n");
+        mock.add_output(
+            "iw",
+            "Wiphy phy0\nvalid interface combinations:\n * #{ managed } <= 1\n",
+        );
 
         let result = check_ap_sta_capability(&mock).await.unwrap();
         assert!(!result.supported);
@@ -1120,11 +1090,8 @@ mod tests {
     #[tokio::test]
     async fn deactivate_ap_sta_success() {
         let mock = MockNetworkManagerConnection::new();
-        let result = deactivate_ap_sta(
-            &mock,
-            "/org/freedesktop/NetworkManager/ActiveConnection/1",
-        )
-        .await;
+        let result =
+            deactivate_ap_sta(&mock, "/org/freedesktop/NetworkManager/ActiveConnection/1").await;
         assert!(result.is_ok());
     }
 
