@@ -6,6 +6,7 @@
 mod config;
 mod dbus;
 mod error;
+mod network;
 
 use zbus::connection::Builder;
 
