@@ -549,6 +549,193 @@ pub async fn check_ap_sta_capability(
     Ok(parse_iw_list(&output))
 }
 
+// --- AP+STA Mode Configuration ---
+
+/// Result of attempting to configure AP+STA mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApStaResult {
+    /// Whether the AP interface was successfully created.
+    pub success: bool,
+    /// The name of the AP interface (e.g., "ap0" or "wlan0_1").
+    pub ap_interface: Option<String>,
+    /// Whether force mode was used (AP+STA not natively supported).
+    pub forced: bool,
+    /// Warning message if force mode was used or if there were issues.
+    pub warning: Option<String>,
+}
+
+/// Connection settings represented as a nested string map.
+/// Outer key: setting section (e.g., "connection", "802-11-wireless").
+/// Inner key: setting name, value: setting value.
+pub type ConnectionSettings = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
+
+/// Trait for NetworkManager connection operations, allowing mocking.
+#[async_trait::async_trait]
+pub trait NetworkManagerConnectionOps {
+    /// Add and activate a new connection via NetworkManager.
+    ///
+    /// Returns the active connection path.
+    async fn add_and_activate_connection(
+        &self,
+        connection_settings: &ConnectionSettings,
+        device_path: &str,
+    ) -> Result<String, NetworkError>;
+
+    /// Deactivate a connection.
+    async fn deactivate_connection(
+        &self,
+        active_connection_path: &str,
+    ) -> Result<(), NetworkError>;
+
+    /// Delete a connection profile.
+    async fn delete_connection(
+        &self,
+        connection_path: &str,
+    ) -> Result<(), NetworkError>;
+
+    /// Get the connection profile path from an active connection.
+    async fn get_connection_profile(
+        &self,
+        active_connection_path: &str,
+    ) -> Result<String, NetworkError>;
+}
+
+/// Build NM connection settings for an AP interface.
+pub fn build_ap_connection_settings(
+    ssid: &str,
+    password: &str,
+    band: &str,
+    _interface: &str,
+) -> ConnectionSettings {
+    let mut settings = std::collections::HashMap::new();
+
+    let mut connection = std::collections::HashMap::new();
+    connection.insert("id".to_string(), format!("Reecho-{ssid}"));
+    connection.insert("type".to_string(), "802-11-wireless".to_string());
+    settings.insert("connection".to_string(), connection);
+
+    let mut wireless = std::collections::HashMap::new();
+    wireless.insert("ssid".to_string(), ssid.to_string());
+    wireless.insert("mode".to_string(), "ap".to_string());
+    wireless.insert("band".to_string(), band.to_string());
+    settings.insert("802-11-wireless".to_string(), wireless);
+
+    let mut security = std::collections::HashMap::new();
+    security.insert("key-mgmt".to_string(), "wpa-psk".to_string());
+    security.insert("psk".to_string(), password.to_string());
+    settings.insert("802-11-wireless-security".to_string(), security);
+
+    let mut ipv4 = std::collections::HashMap::new();
+    ipv4.insert("method".to_string(), "shared".to_string());
+    settings.insert("ipv4".to_string(), ipv4);
+
+    let mut ipv6 = std::collections::HashMap::new();
+    ipv6.insert("method".to_string(), "auto".to_string());
+    settings.insert("ipv6".to_string(), ipv6);
+
+    settings
+}
+
+/// Activate AP+STA mode via NetworkManager.
+///
+/// Creates a virtual AP interface while preserving the existing STA connection.
+/// If AP+STA is not natively supported, proceeds with a warning (force mode).
+pub async fn activate_ap_sta(
+    nm: &(impl NetworkManagerConnectionOps + Sync),
+    ssid: &str,
+    password: &str,
+    band: &str,
+    sta_interface: &str,
+    capability: &ApStaCapability,
+) -> Result<ApStaResult, NetworkError> {
+    let mut warning = None;
+
+    if !capability.supported {
+        warning = Some(format!(
+            "AP+STA not supported on {}. Proceeding in force mode. Chipset: {}. Reason: {}",
+            sta_interface,
+            capability.chipset.as_deref().unwrap_or("unknown"),
+            capability.reason
+        ));
+        tracing::warn!("{}", warning.as_ref().unwrap());
+    }
+
+    let settings = build_ap_connection_settings(ssid, password, band, sta_interface);
+
+    let _active_path = nm
+        .add_and_activate_connection(&settings, sta_interface)
+        .await?;
+
+    let ap_interface = Some(sta_interface.to_string());
+
+    Ok(ApStaResult {
+        success: true,
+        ap_interface,
+        forced: !capability.supported,
+        warning,
+    })
+}
+
+/// Deactivate AP+STA mode by removing the AP connection.
+pub async fn deactivate_ap_sta(
+    nm: &(impl NetworkManagerConnectionOps + Sync),
+    active_connection_path: &str,
+) -> Result<(), NetworkError> {
+    nm.deactivate_connection(active_connection_path).await?;
+    let profile_path = nm
+        .get_connection_profile(active_connection_path)
+        .await?;
+    nm.delete_connection(&profile_path).await?;
+    Ok(())
+}
+
+/// Mock NetworkManager connection operations for testing.
+pub struct MockNetworkManagerConnection {
+    next_id: std::sync::atomic::AtomicU32,
+}
+
+impl MockNetworkManagerConnection {
+    pub fn new() -> Self {
+        Self {
+            next_id: std::sync::atomic::AtomicU32::new(1),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkManagerConnectionOps for MockNetworkManagerConnection {
+    async fn add_and_activate_connection(
+        &self,
+        _connection_settings: &ConnectionSettings,
+        _device_path: &str,
+    ) -> Result<String, NetworkError> {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(format!(
+            "/org/freedesktop/NetworkManager/ActiveConnection/{id}"
+        ))
+    }
+
+    async fn deactivate_connection(
+        &self,
+        _active_connection_path: &str,
+    ) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    async fn delete_connection(&self, _connection_path: &str) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    async fn get_connection_profile(
+        &self,
+        _active_connection_path: &str,
+    ) -> Result<String, NetworkError> {
+        Ok("/org/freedesktop/NetworkManager/Settings/1".to_string())
+    }
+}
+
 /// Mock CommandRunner for testing.
 pub struct MockCommandRunner {
     outputs: std::collections::HashMap<String, String>,
@@ -875,5 +1062,96 @@ mod tests {
 
         let result = check_ap_sta_capability(&mock).await.unwrap();
         assert!(!result.supported);
+    }
+
+    // --- AP+STA configuration tests ---
+
+    #[tokio::test]
+    async fn activate_ap_sta_supported() {
+        let mock = MockNetworkManagerConnection::new();
+        let capability = ApStaCapability {
+            supported: true,
+            chipset: Some("iwlwifi".to_string()),
+            reason: "Found valid AP+STA combination".to_string(),
+        };
+
+        let result = activate_ap_sta(
+            &mock,
+            "TestSSID",
+            "password123",
+            "5GHz",
+            "wlan0",
+            &capability,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.success);
+        assert!(!result.forced);
+        assert!(result.warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn activate_ap_sta_unsupported_forces_with_warning() {
+        let mock = MockNetworkManagerConnection::new();
+        let capability = ApStaCapability {
+            supported: false,
+            chipset: Some("rtl8821ce".to_string()),
+            reason: "No valid AP+STA combination found".to_string(),
+        };
+
+        let result = activate_ap_sta(
+            &mock,
+            "TestSSID",
+            "password123",
+            "5GHz",
+            "wlan0",
+            &capability,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.success);
+        assert!(result.forced);
+        assert!(result.warning.is_some());
+        assert!(result.warning.unwrap().contains("rtl8821ce"));
+    }
+
+    #[tokio::test]
+    async fn deactivate_ap_sta_success() {
+        let mock = MockNetworkManagerConnection::new();
+        let result = deactivate_ap_sta(
+            &mock,
+            "/org/freedesktop/NetworkManager/ActiveConnection/1",
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_ap_connection_settings_has_required_fields() {
+        let settings = build_ap_connection_settings("MySSID", "mypassword123", "5GHz", "wlan0");
+
+        assert!(settings.contains_key("connection"));
+        assert!(settings.contains_key("802-11-wireless"));
+        assert!(settings.contains_key("802-11-wireless-security"));
+        assert!(settings.contains_key("ipv4"));
+        assert!(settings.contains_key("ipv6"));
+
+        let conn = &settings["connection"];
+        assert_eq!(conn["id"], "Reecho-MySSID");
+        assert_eq!(conn["type"], "802-11-wireless");
+
+        let wireless = &settings["802-11-wireless"];
+        assert_eq!(wireless["ssid"], "MySSID");
+        assert_eq!(wireless["mode"], "ap");
+        assert_eq!(wireless["band"], "5GHz");
+
+        let security = &settings["802-11-wireless-security"];
+        assert_eq!(security["key-mgmt"], "wpa-psk");
+        assert_eq!(security["psk"], "mypassword123");
+
+        let ipv4 = &settings["ipv4"];
+        assert_eq!(ipv4["method"], "shared");
     }
 }
