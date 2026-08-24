@@ -420,6 +420,163 @@ pub async fn get_wifi_state(
     })
 }
 
+// --- AP+STA Capability Detection ---
+
+/// Result of an AP+STA capability check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApStaCapability {
+    /// Whether AP+STA concurrent mode is supported.
+    pub supported: bool,
+    /// The chipset or driver name, if detectable.
+    pub chipset: Option<String>,
+    /// Human-readable explanation of the verdict.
+    pub reason: String,
+}
+
+/// Trait for executing system commands, allowing mocking in tests.
+#[async_trait::async_trait]
+pub trait CommandRunner {
+    /// Run a command and return its stdout.
+    async fn run_command(&self, command: &str, args: &[&str]) -> Result<String, NetworkError>;
+}
+
+/// Real command runner using `tokio::process::Command`.
+pub struct RealCommandRunner;
+
+#[async_trait::async_trait]
+impl CommandRunner for RealCommandRunner {
+    async fn run_command(&self, command: &str, args: &[&str]) -> Result<String, NetworkError> {
+        let output = tokio::process::Command::new(command)
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| NetworkError::Parse(format!("failed to run {command}: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NetworkError::Parse(format!(
+                "{command} failed: {stderr}"
+            )));
+        }
+
+        String::from_utf8(output.stdout)
+            .map_err(|e| NetworkError::Parse(format!("invalid UTF-8 from {command}: {e}")))
+    }
+}
+
+/// Parse `iw list` output to determine AP+STA concurrent mode support.
+///
+/// Looks for valid interface combinations that include both `AP` and `managed`
+/// (STA) modes simultaneously.
+pub fn parse_iw_list(output: &str) -> ApStaCapability {
+    let mut chipset: Option<String> = None;
+    let mut in_combinations = false;
+    let mut current_combination = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+
+        // Extract chipset/driver name from "wiphy <name>" line.
+        if trimmed.starts_with("Wiphy ") {
+            chipset = Some(trimmed["Wiphy ".len()..].to_string());
+        }
+
+        // Detect the start of interface combinations section.
+        if trimmed.contains("valid interface combinations:") {
+            in_combinations = true;
+            continue;
+        }
+
+        // Parse combinations.
+        if in_combinations {
+            if trimmed.starts_with("* {") {
+                // Start of a new combination — check the previous one.
+                if !current_combination.is_empty() {
+                    if has_ap_and_managed(&current_combination) {
+                        return ApStaCapability {
+                            supported: true,
+                            chipset,
+                            reason: "Found valid AP+STA combination".to_string(),
+                        };
+                    }
+                }
+                current_combination = vec![trimmed.to_string()];
+            } else if !trimmed.is_empty() && !trimmed.starts_with("#") {
+                current_combination.push(trimmed.to_string());
+            } else if trimmed.is_empty() || trimmed.starts_with("Software interface") {
+                // End of combinations section.
+                if !current_combination.is_empty() && has_ap_and_managed(&current_combination) {
+                    return ApStaCapability {
+                        supported: true,
+                        chipset,
+                        reason: "Found valid AP+STA combination".to_string(),
+                    };
+                }
+                in_combinations = false;
+            }
+        }
+    }
+
+    // Check the last combination if we're still in the section.
+    if in_combinations && !current_combination.is_empty() {
+        if has_ap_and_managed(&current_combination) {
+            return ApStaCapability {
+                supported: true,
+                chipset,
+                reason: "Found valid AP+STA combination".to_string(),
+            };
+        }
+    }
+
+    ApStaCapability {
+        supported: false,
+        chipset,
+        reason: "No valid AP+STA combination found in `iw list` output".to_string(),
+    }
+}
+
+/// Check if a combination of interface modes includes both AP and managed (STA).
+fn has_ap_and_managed(combination: &[String]) -> bool {
+    let joined = combination.join(" ");
+    joined.contains("AP") && (joined.contains("managed") || joined.contains("* managed"))
+}
+
+/// Check AP+STA capability by running `iw list`.
+pub async fn check_ap_sta_capability(
+    runner: &(impl CommandRunner + Sync),
+) -> Result<ApStaCapability, NetworkError> {
+    let output = runner.run_command("iw", &["list"]).await?;
+    Ok(parse_iw_list(&output))
+}
+
+/// Mock CommandRunner for testing.
+pub struct MockCommandRunner {
+    outputs: std::collections::HashMap<String, String>,
+}
+
+impl MockCommandRunner {
+    pub fn new() -> Self {
+        Self {
+            outputs: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn add_output(&mut self, key: &str, output: &str) {
+        self.outputs
+            .insert(key.to_string(), output.to_string());
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandRunner for MockCommandRunner {
+    async fn run_command(&self, command: &str, _args: &[&str]) -> Result<String, NetworkError> {
+        self.outputs
+            .get(command)
+            .cloned()
+            .ok_or_else(|| NetworkError::Parse(format!("no mock output for {command}")))
+    }
+}
+
 /// Mock NetworkManager for testing.
 pub struct MockNetworkManager {
     devices: Vec<String>,
@@ -631,5 +788,92 @@ mod tests {
             active_connection_path: String::new(),
         };
         assert_eq!(state.to_string(), "disconnected");
+    }
+
+    // --- AP+STA capability tests ---
+
+    #[test]
+    fn parse_iw_list_with_ap_sta_support() {
+        let iw_output = r#"Wiphy phy0
+        max # scan SSIDs: 4
+        max # scan IEs: 2281 bytes
+        max # sched scan SSIDs: 0
+        max # sched scan match IEs: 0
+        max # scheduled scans: 0
+        max # match sets: 0
+        Retry short limit: 7
+        Retry long limit: 4
+        Coverage class: 0 (up to 0m)
+        Device supports T-DLS.
+        Supported interface modes:
+         * IBSS
+         * managed
+         * AP
+         * P2P-client
+         * P2P-GO
+         * P2P device
+        valid interface combinations:
+         * #{ AP, P2P-device } <= 1, #{ managed } <= 16, total <= 17, DMI要求 <= 1
+         * #{ managed } <= 16
+        Supported commands:
+         * new_interface
+         * set_interface
+        "#;
+
+        let result = parse_iw_list(iw_output);
+        assert!(result.supported);
+        assert_eq!(result.chipset, Some("phy0".to_string()));
+    }
+
+    #[test]
+    fn parse_iw_list_without_ap_sta_support() {
+        let iw_output_no_ap = r#"Wiphy phy0
+        Supported interface modes:
+         * managed
+        valid interface combinations:
+         * #{ managed } <= 1
+        "#;
+
+        let result = parse_iw_list(iw_output_no_ap);
+        assert!(!result.supported);
+        assert_eq!(result.chipset, Some("phy0".to_string()));
+    }
+
+    #[test]
+    fn parse_iw_list_empty_output() {
+        let result = parse_iw_list("");
+        assert!(!result.supported);
+        assert!(result.chipset.is_none());
+    }
+
+    #[test]
+    fn parse_iw_list_extracts_chipset() {
+        let iw_output = r#"Wiphy phy1
+        Supported interface modes:
+         * managed
+        valid interface combinations:
+         * #{ managed } <= 1
+        "#;
+        let result = parse_iw_list(iw_output);
+        assert_eq!(result.chipset, Some("phy1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn check_ap_sta_capability_with_mock() {
+        let mut mock = MockCommandRunner::new();
+        mock.add_output("iw", "Wiphy phy0\nvalid interface combinations:\n * { AP }, #{ managed } <= 1, total <= 2\n");
+
+        let result = check_ap_sta_capability(&mock).await.unwrap();
+        assert!(result.supported);
+        assert_eq!(result.chipset, Some("phy0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn check_ap_sta_capability_not_supported() {
+        let mut mock = MockCommandRunner::new();
+        mock.add_output("iw", "Wiphy phy0\nvalid interface combinations:\n * #{ managed } <= 1\n");
+
+        let result = check_ap_sta_capability(&mock).await.unwrap();
+        assert!(!result.supported);
     }
 }
