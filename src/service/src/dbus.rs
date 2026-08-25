@@ -104,3 +104,59 @@ impl ReechoService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_state_returns_inactive_by_default() {
+        let service = ReechoService::new();
+        assert_eq!(service.get_state().await, "inactive");
+    }
+
+    #[tokio::test]
+    async fn get_warning_returns_empty_by_default() {
+        let service = ReechoService::new();
+        assert_eq!(service.get_warning().await, "");
+    }
+
+    #[tokio::test]
+    async fn set_state_updates_state_and_warning() {
+        let mut service = ReechoService::new();
+        service.set_state(HotspotState::Active, Some("Force mode active".to_string()));
+        assert_eq!(service.get_state().await, "active");
+        assert_eq!(service.get_warning().await, "Force mode active");
+    }
+
+    #[tokio::test]
+    async fn deactivate_clears_warning() {
+        let mut service = ReechoService::new();
+        service.set_state(HotspotState::Active, Some("Force mode active".to_string()));
+        service.deactivate().await.unwrap();
+        assert_eq!(service.get_state().await, "inactive");
+        assert_eq!(service.get_warning().await, "");
+    }
+
+    #[tokio::test]
+    async fn activate_sets_active_state() {
+        let mut service = ReechoService::new();
+        service
+            .activate(
+                "Test".to_string(),
+                "pass1234".to_string(),
+                "5GHz".to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(service.get_state().await, "active");
+    }
+
+    #[tokio::test]
+    async fn deactivate_from_inactive_is_noop() {
+        let mut service = ReechoService::new();
+        service.deactivate().await.unwrap();
+        assert_eq!(service.get_state().await, "inactive");
+        assert_eq!(service.get_warning().await, "");
+    }
+}
