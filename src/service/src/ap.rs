@@ -209,6 +209,203 @@ pub fn validate_config(config: &HostapdConfig) -> Result<(), ServiceError> {
     Ok(())
 }
 
+// --- Process Management ---
+
+use std::path::PathBuf;
+use std::process::Stdio;
+
+/// Errors from hostapd process management.
+#[derive(Debug, thiserror::Error)]
+pub enum HostapdError {
+    /// Failed to write config file.
+    #[error("failed to write config: {0}")]
+    ConfigWrite(String),
+
+    /// Failed to start hostapd.
+    #[error("failed to start hostapd: {0}")]
+    StartFailed(String),
+
+    /// hostapd process exited unexpectedly.
+    #[error("hostapd exited with code {code}: {stderr}")]
+    Exited { code: i32, stderr: String },
+
+    /// hostapd process was killed (e.g., by signal).
+    #[error("hostapd was killed: {0}")]
+    Killed(String),
+
+    /// Failed to stop hostapd.
+    #[error("failed to stop hostapd: {0}")]
+    StopFailed(String),
+
+    /// hostapd binary not found.
+    #[error("hostapd binary not found at {0}")]
+    BinaryNotFound(String),
+}
+
+/// Result of starting hostapd.
+#[derive(Debug)]
+pub struct HostapdProcess {
+    /// Path to the config file used.
+    pub config_path: PathBuf,
+    /// PID of the hostapd process.
+    pub pid: u32,
+}
+
+/// Trait for spawning hostapd processes, allowing mocking.
+#[async_trait::async_trait]
+pub trait HostapdSpawner {
+    /// Spawn hostapd with the given config file.
+    ///
+    /// Returns the PID of the spawned process.
+    async fn spawn_hostapd(&self, config_path: &PathBuf) -> Result<u32, HostapdError>;
+
+    /// Kill a process by PID.
+    async fn kill_process(&self, pid: u32) -> Result<(), HostapdError>;
+
+    /// Check if a process is still running.
+    async fn is_running(&self, pid: u32) -> bool;
+}
+
+/// Real hostapd spawner using tokio::process.
+pub struct RealHostapdSpawner;
+
+#[async_trait::async_trait]
+impl HostapdSpawner for RealHostapdSpawner {
+    async fn spawn_hostapd(&self, config_path: &PathBuf) -> Result<u32, HostapdError> {
+        let child = tokio::process::Command::new("hostapd")
+            .arg(config_path.to_str().unwrap_or_default())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    HostapdError::BinaryNotFound("hostapd".to_string())
+                } else {
+                    HostapdError::StartFailed(e.to_string())
+                }
+            })?;
+
+        let pid = child.id().unwrap_or(0);
+
+        // Detach the child so it runs independently.
+        // We'll manage it via hostapd_cli later.
+        tokio::spawn(async move {
+            let _ = child.wait_with_output().await;
+        });
+
+        Ok(pid)
+    }
+
+    async fn kill_process(&self, pid: u32) -> Result<(), HostapdError> {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+
+        // Give it a moment to shut down gracefully.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Force kill if still running.
+        if self.is_running(pid).await {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn is_running(&self, pid: u32) -> bool {
+        // Check if process exists by sending signal 0.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+}
+
+/// Write hostapd config to a temporary file and return the path.
+pub async fn write_config_file(config: &HostapdConfig) -> Result<PathBuf, HostapdError> {
+    let conf_content = config.to_hostapd_conf();
+    let dir = std::env::temp_dir();
+    let file_name = format!("reecho-hostapd-{}.conf", config.interface);
+    let path = dir.join(file_name);
+
+    tokio::fs::write(&path, conf_content)
+        .await
+        .map_err(|e| HostapdError::ConfigWrite(e.to_string()))?;
+
+    Ok(path)
+}
+
+/// Start hostapd with the given configuration.
+pub async fn start_hostapd(
+    config: &HostapdConfig,
+    spawner: &(impl HostapdSpawner + Sync),
+) -> Result<HostapdProcess, HostapdError> {
+    validate_config(config).map_err(|e| HostapdError::StartFailed(e.to_string()))?;
+
+    let config_path = write_config_file(config).await?;
+    let pid = spawner.spawn_hostapd(&config_path).await?;
+
+    tracing::info!("started hostapd (pid {pid}) with config {}", config_path.display());
+
+    Ok(HostapdProcess {
+        config_path,
+        pid,
+    })
+}
+
+/// Stop hostapd and clean up config file.
+pub async fn stop_hostapd(
+    process: &HostapdProcess,
+    spawner: &(impl HostapdSpawner + Sync),
+) -> Result<(), HostapdError> {
+    tracing::info!("stopping hostapd (pid {})", process.pid);
+
+    spawner.kill_process(process.pid).await?;
+
+    // Clean up config file.
+    let _ = tokio::fs::remove_file(&process.config_path).await;
+
+    Ok(())
+}
+
+/// Mock hostapd spawner for testing.
+pub struct MockHostapdSpawner {
+    next_pid: std::sync::atomic::AtomicU32,
+    running: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
+}
+
+impl MockHostapdSpawner {
+    pub fn new() -> Self {
+        Self {
+            next_pid: std::sync::atomic::AtomicU32::new(1000),
+            running: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        }
+    }
+
+    pub fn get_running_pids(&self) -> Vec<u32> {
+        self.running.lock().unwrap().iter().copied().collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl HostapdSpawner for MockHostapdSpawner {
+    async fn spawn_hostapd(&self, _config_path: &PathBuf) -> Result<u32, HostapdError> {
+        let pid = self
+            .next_pid
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.running.lock().unwrap().insert(pid);
+        Ok(pid)
+    }
+
+    async fn kill_process(&self, pid: u32) -> Result<(), HostapdError> {
+        self.running.lock().unwrap().remove(&pid);
+        Ok(())
+    }
+
+    async fn is_running(&self, pid: u32) -> bool {
+        self.running.lock().unwrap().contains(&pid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +627,77 @@ mod tests {
         assert!(conf.contains("wpa=2"));
         assert!(conf.contains("wpa_key_mgmt=WPA-PSK"));
         assert!(conf.contains("rsn_pairwise=CCMP"));
+    }
+
+    // --- Process management tests ---
+
+    #[tokio::test]
+    async fn start_hostapd_with_mock() {
+        let config = HostapdConfig::new(
+            "wlan0".to_string(),
+            "TestNet".to_string(),
+            "password123".to_string(),
+            Band::Band5Ghz,
+        )
+        .unwrap();
+
+        let spawner = MockHostapdSpawner::new();
+        let process = start_hostapd(&config, &spawner).await.unwrap();
+
+        assert!(process.pid > 0);
+        assert!(spawner.is_running(process.pid).await);
+
+        // Clean up temp config file.
+        let _ = tokio::fs::remove_file(&process.config_path).await;
+    }
+
+    #[tokio::test]
+    async fn stop_hostapd_with_mock() {
+        let config = HostapdConfig::new(
+            "wlan0".to_string(),
+            "TestNet".to_string(),
+            "password123".to_string(),
+            Band::Band5Ghz,
+        )
+        .unwrap();
+
+        let spawner = MockHostapdSpawner::new();
+        let process = start_hostapd(&config, &spawner).await.unwrap();
+        assert!(spawner.is_running(process.pid).await);
+
+        stop_hostapd(&process, &spawner).await.unwrap();
+        assert!(!spawner.is_running(process.pid).await);
+    }
+
+    #[tokio::test]
+    async fn write_config_file_creates_file() {
+        let config = HostapdConfig::new(
+            "wlan0".to_string(),
+            "TestNet".to_string(),
+            "password123".to_string(),
+            Band::Band5Ghz,
+        )
+        .unwrap();
+
+        let path = write_config_file(&config).await.unwrap();
+        assert!(path.exists());
+
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(contents.contains("ssid=TestNet"));
+        assert!(contents.contains("interface=wlan0"));
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[test]
+    fn mock_spawner_pid_increments() {
+        let spawner = MockHostapdSpawner::new();
+        let pid1 = spawner
+            .next_pid
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let pid2 = spawner
+            .next_pid
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(pid2 > pid1);
     }
 }
