@@ -5,6 +5,8 @@ use reecho_shared::HotspotState;
 /// The Reecho service D-Bus interface.
 pub struct ReechoService {
     state: HotspotState,
+    /// Warning message from the last activation (e.g., force mode).
+    warning: Option<String>,
 }
 
 impl ReechoService {
@@ -12,7 +14,14 @@ impl ReechoService {
     pub fn new() -> Self {
         Self {
             state: HotspotState::Inactive,
+            warning: None,
         }
+    }
+
+    /// Set the current state and optional warning.
+    pub fn set_state(&mut self, state: HotspotState, warning: Option<String>) {
+        self.state = state;
+        self.warning = warning;
     }
 }
 
@@ -23,6 +32,11 @@ impl ReechoService {
         self.state.to_string()
     }
 
+    /// Get the current warning message, if any.
+    async fn get_warning(&self) -> String {
+        self.warning.clone().unwrap_or_default()
+    }
+
     /// Activate the hotspot with the given parameters.
     async fn activate(
         &mut self,
@@ -30,15 +44,16 @@ impl ReechoService {
         _password: String,
         _band: String,
     ) -> Result<(), zbus::fdo::Error> {
-        // Placeholder — full implementation in Phase 4.
+        // Placeholder — full implementation in Phase 5.
         self.state = HotspotState::Active;
         Ok(())
     }
 
     /// Deactivate the hotspot.
     async fn deactivate(&mut self) -> Result<(), zbus::fdo::Error> {
-        // Placeholder — full implementation in Phase 4.
+        // Placeholder — full implementation in Phase 5.
         self.state = HotspotState::Inactive;
+        self.warning = None;
         Ok(())
     }
 
@@ -85,7 +100,7 @@ impl ReechoService {
         _password: String,
         _band: String,
     ) -> Result<(), zbus::fdo::Error> {
-        // Placeholder — full implementation in Phase 2.
+        // Placeholder — full implementation in Phase 5.
         Ok(())
     }
 }

@@ -5,6 +5,9 @@
     <method name="GetState">
       <arg name="state" type="s" direction="out"/>
     </method>
+    <method name="GetWarning">
+      <arg name="message" type="s" direction="out"/>
+    </method>
     <method name="Activate">
       <arg name="ssid" type="s" direction="in"/>
       <arg name="password" type="s" direction="in"/>
@@ -49,5 +52,8 @@
       <arg name="mac" type="s"/>
     </signal>
     <signal name="DataLimitReached"/>
+    <signal name="Warning">
+      <arg name="message" type="s"/>
+    </signal>
   </interface>
 </node>
