@@ -3,6 +3,7 @@
 //! Manages the hotspot lifecycle via NetworkManager and hostapd.
 //! Exposes a D-Bus API for the GNOME Shell extension and CLI.
 
+mod activation;
 mod ap;
 mod config;
 mod dbus;

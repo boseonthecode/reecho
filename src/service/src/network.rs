@@ -343,7 +343,7 @@ impl NetworkManagerOps for NetworkManagerClient {
 
 /// Detect the current Wi-Fi state from NetworkManager.
 pub async fn get_wifi_state(
-    nm: &(impl NetworkManagerOps + Sync),
+    nm: &(impl NetworkManagerOps + Sync + ?Sized),
 ) -> Result<WifiState, NetworkError> {
     let devices = nm.get_devices().await?;
 
@@ -527,7 +527,7 @@ fn has_ap_and_managed(combination: &[String]) -> bool {
 
 /// Check AP+STA capability by running `iw list`.
 pub async fn check_ap_sta_capability(
-    runner: &(impl CommandRunner + Sync),
+    runner: &(impl CommandRunner + Sync + ?Sized),
 ) -> Result<ApStaCapability, NetworkError> {
     let output = runner.run_command("iw", &["list"]).await?;
     Ok(parse_iw_list(&output))
@@ -621,7 +621,7 @@ pub fn build_ap_connection_settings(
 /// Creates a virtual AP interface while preserving the existing STA connection.
 /// If AP+STA is not natively supported, proceeds with a warning (force mode).
 pub async fn activate_ap_sta(
-    nm: &(impl NetworkManagerConnectionOps + Sync),
+    nm: &(impl NetworkManagerConnectionOps + Sync + ?Sized),
     ssid: &str,
     password: &str,
     band: &str,
@@ -658,7 +658,7 @@ pub async fn activate_ap_sta(
 
 /// Deactivate AP+STA mode by removing the AP connection.
 pub async fn deactivate_ap_sta(
-    nm: &(impl NetworkManagerConnectionOps + Sync),
+    nm: &(impl NetworkManagerConnectionOps + Sync + ?Sized),
     active_connection_path: &str,
 ) -> Result<(), NetworkError> {
     nm.deactivate_connection(active_connection_path).await?;

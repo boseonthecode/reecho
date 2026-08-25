@@ -331,7 +331,7 @@ pub async fn write_config_file(config: &HostapdConfig) -> Result<PathBuf, Hostap
 /// Start hostapd with the given configuration.
 pub async fn start_hostapd(
     config: &HostapdConfig,
-    spawner: &(impl HostapdSpawner + Sync),
+    spawner: &(impl HostapdSpawner + Sync + ?Sized),
 ) -> Result<HostapdProcess, HostapdError> {
     validate_config(config).map_err(|e| HostapdError::StartFailed(e.to_string()))?;
 
@@ -349,7 +349,7 @@ pub async fn start_hostapd(
 /// Stop hostapd and clean up config file.
 pub async fn stop_hostapd(
     process: &HostapdProcess,
-    spawner: &(impl HostapdSpawner + Sync),
+    spawner: &(impl HostapdSpawner + Sync + ?Sized),
 ) -> Result<(), HostapdError> {
     tracing::info!("stopping hostapd (pid {})", process.pid);
 
@@ -616,7 +616,7 @@ impl ApLifecycleMonitor {
 /// is still running. Returns when the process exits or `stop` is set.
 pub async fn monitor_hostapd(
     process: &HostapdProcess,
-    querier: &(impl HostapdStatusQuerier + Sync),
+    querier: &(impl HostapdStatusQuerier + Sync + ?Sized),
     poll_interval_ms: u64,
 ) -> HostapdStatus {
     let mut monitor = ApLifecycleMonitor::new(&process.pid.to_string());
