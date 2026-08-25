@@ -112,13 +112,7 @@ rsn_pairwise=CCMP
 
 impl fmt::Display for HostapdConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} ({} on {})",
-            self.ssid,
-            self.band,
-            self.interface,
-        )
+        write!(f, "{} ({} on {})", self.ssid, self.band, self.interface,)
     }
 }
 
@@ -344,12 +338,12 @@ pub async fn start_hostapd(
     let config_path = write_config_file(config).await?;
     let pid = spawner.spawn_hostapd(&config_path).await?;
 
-    tracing::info!("started hostapd (pid {pid}) with config {}", config_path.display());
+    tracing::info!(
+        "started hostapd (pid {pid}) with config {}",
+        config_path.display()
+    );
 
-    Ok(HostapdProcess {
-        config_path,
-        pid,
-    })
+    Ok(HostapdProcess { config_path, pid })
 }
 
 /// Stop hostapd and clean up config file.
@@ -403,6 +397,309 @@ impl HostapdSpawner for MockHostapdSpawner {
 
     async fn is_running(&self, pid: u32) -> bool {
         self.running.lock().unwrap().contains(&pid)
+    }
+}
+
+// --- Lifecycle Monitoring ---
+
+use std::collections::HashMap;
+
+/// AP state for lifecycle tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApState {
+    /// AP is not running.
+    Down,
+    /// AP is starting up.
+    Starting,
+    /// AP is fully up and accepting connections.
+    Up,
+    /// AP crashed or stopped unexpectedly.
+    Failed,
+}
+
+impl std::fmt::Display for ApState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Down => write!(f, "down"),
+            Self::Starting => write!(f, "starting"),
+            Self::Up => write!(f, "up"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// Result from `hostapd_cli status` parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostapdStatus {
+    /// Whether hostapd is running.
+    pub is_running: bool,
+    /// Whether the AP interface is up.
+    pub ap_is_up: bool,
+    /// Number of connected stations.
+    pub station_count: u32,
+    /// The SSID being broadcast.
+    pub ssid: String,
+    /// Raw key-value pairs from hostapd_cli status.
+    pub fields: HashMap<String, String>,
+}
+
+impl Default for HostapdStatus {
+    fn default() -> Self {
+        Self {
+            is_running: false,
+            ap_is_up: false,
+            station_count: 0,
+            ssid: String::new(),
+            fields: HashMap::new(),
+        }
+    }
+}
+
+/// Parse `hostapd_cli status` output into structured data.
+///
+/// Example output:
+/// ```text
+/// state=ENABLED
+/// freq=2437
+/// channel=6
+/// ssid=TestNetwork
+/// num_sta[0]=2
+/// ```
+pub fn parse_hostapd_status(output: &str) -> HostapdStatus {
+    let mut fields = HashMap::new();
+    let mut ssid = String::new();
+    let mut station_count: u32 = 0;
+
+    for line in output.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            fields.insert(key.clone(), value.clone());
+
+            if key == "ssid" {
+                ssid = value.clone();
+            }
+            // Count stations from num_sta[N] fields.
+            if key.starts_with("num_sta[") {
+                if let Ok(count) = value.parse::<u32>() {
+                    station_count += count;
+                }
+            }
+        }
+    }
+
+    let state = fields.get("state").map(|s| s.as_str()).unwrap_or("");
+    let ap_is_up = state == "ENABLED" || state == "ACTIVE";
+
+    HostapdStatus {
+        is_running: !fields.is_empty(),
+        ap_is_up,
+        station_count,
+        ssid,
+        fields,
+    }
+}
+
+/// Trait for querying hostapd status, allowing mocking.
+#[async_trait::async_trait]
+pub trait HostapdStatusQuerier {
+    /// Query hostapd_cli status for the given interface.
+    async fn query_status(&self, interface: &str) -> Result<String, HostapdError>;
+
+    /// Check if the hostapd process is still running.
+    async fn is_process_running(&self, pid: u32) -> bool;
+}
+
+/// Real hostapd status querier using hostapd_cli.
+pub struct RealHostapdStatusQuerier;
+
+#[async_trait::async_trait]
+impl HostapdStatusQuerier for RealHostapdStatusQuerier {
+    async fn query_status(&self, interface: &str) -> Result<String, HostapdError> {
+        let output = tokio::process::Command::new("hostapd_cli")
+            .args(["-i", interface, "status"])
+            .output()
+            .await
+            .map_err(|e| HostapdError::StopFailed(format!("hostapd_cli failed: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(HostapdError::StopFailed(format!(
+                "hostapd_cli status failed: {stderr}"
+            )));
+        }
+
+        String::from_utf8(output.stdout)
+            .map_err(|e| HostapdError::StopFailed(format!("invalid UTF-8: {e}")))
+    }
+
+    async fn is_process_running(&self, pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+}
+
+/// Lifecycle monitor that tracks AP state changes.
+pub struct ApLifecycleMonitor {
+    state: ApState,
+    interface: String,
+}
+
+impl ApLifecycleMonitor {
+    /// Create a new lifecycle monitor for the given interface.
+    pub fn new(interface: &str) -> Self {
+        Self {
+            state: ApState::Down,
+            interface: interface.to_string(),
+        }
+    }
+
+    /// Get the current AP state.
+    pub fn state(&self) -> ApState {
+        self.state
+    }
+
+    /// Update the state based on hostapd_cli status output.
+    pub fn update_from_status(&mut self, status: &HostapdStatus) -> Option<ApState> {
+        let old_state = self.state;
+
+        if !status.is_running {
+            self.state = if old_state == ApState::Starting || old_state == ApState::Up {
+                ApState::Failed
+            } else {
+                ApState::Down
+            };
+        } else if status.ap_is_up {
+            self.state = ApState::Up;
+        } else {
+            self.state = ApState::Starting;
+        }
+
+        if self.state != old_state {
+            tracing::info!(
+                "AP state changed on {}: {} -> {}",
+                self.interface,
+                old_state,
+                self.state
+            );
+            Some(self.state)
+        } else {
+            None
+        }
+    }
+
+    /// Mark the AP as down.
+    pub fn mark_down(&mut self) -> Option<ApState> {
+        let old = self.state;
+        self.state = ApState::Down;
+        if old != ApState::Down {
+            Some(self.state)
+        } else {
+            None
+        }
+    }
+
+    /// Mark the AP as failed.
+    pub fn mark_failed(&mut self) -> Option<ApState> {
+        let old = self.state;
+        self.state = ApState::Failed;
+        if old != ApState::Failed {
+            Some(self.state)
+        } else {
+            None
+        }
+    }
+}
+
+/// Monitor hostapd and return state changes.
+///
+/// Polls `hostapd_cli status` at the given interval and checks if the process
+/// is still running. Returns when the process exits or `stop` is set.
+pub async fn monitor_hostapd(
+    process: &HostapdProcess,
+    querier: &(impl HostapdStatusQuerier + Sync),
+    poll_interval_ms: u64,
+) -> HostapdStatus {
+    let mut monitor = ApLifecycleMonitor::new(&process.pid.to_string());
+
+    loop {
+        // Check if process is still running.
+        if !querier.is_process_running(process.pid).await {
+            monitor.mark_failed();
+            tracing::warn!("hostapd process {} exited unexpectedly", process.pid);
+            break;
+        }
+
+        // Query status via hostapd_cli.
+        match querier.query_status(&process.pid.to_string()).await {
+            Ok(output) => {
+                let status = parse_hostapd_status(&output);
+                monitor.update_from_status(&status);
+
+                if monitor.state() == ApState::Up || monitor.state() == ApState::Failed {
+                    return status;
+                }
+            }
+            Err(e) => {
+                tracing::debug!("hostapd_cli query failed: {e}");
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms)).await;
+    }
+
+    HostapdStatus::default()
+}
+
+/// Mock hostapd status querier for testing.
+pub struct MockHostapdStatusQuerier {
+    status_sequence: std::sync::Mutex<Vec<String>>,
+    call_count: std::sync::atomic::AtomicUsize,
+    running_pids: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
+}
+
+impl MockHostapdStatusQuerier {
+    pub fn new() -> Self {
+        Self {
+            status_sequence: std::sync::Mutex::new(Vec::new()),
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+            running_pids: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+        }
+    }
+
+    pub fn add_status_response(&self, response: &str) {
+        self.status_sequence
+            .lock()
+            .unwrap()
+            .push(response.to_string());
+    }
+
+    pub fn set_process_running(&self, pid: u32, running: bool) {
+        if running {
+            self.running_pids.lock().unwrap().insert(pid);
+        } else {
+            self.running_pids.lock().unwrap().remove(&pid);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl HostapdStatusQuerier for MockHostapdStatusQuerier {
+    async fn query_status(&self, _interface: &str) -> Result<String, HostapdError> {
+        let idx = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let sequence = self.status_sequence.lock().unwrap();
+        if idx < sequence.len() {
+            Ok(sequence[idx].clone())
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    async fn is_process_running(&self, pid: u32) -> bool {
+        self.running_pids.lock().unwrap().contains(&pid)
     }
 }
 
@@ -699,5 +996,174 @@ mod tests {
             .next_pid
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         assert!(pid2 > pid1);
+    }
+
+    // --- Lifecycle monitoring tests ---
+
+    #[test]
+    fn parse_hostapd_status_empty() {
+        let status = parse_hostapd_status("");
+        assert!(!status.is_running);
+        assert!(!status.ap_is_up);
+        assert_eq!(status.station_count, 0);
+    }
+
+    #[test]
+    fn parse_hostapd_status_with_ap_up() {
+        let output = "state=ENABLED\nfreq=2437\nchannel=6\nssid=TestNet\nnum_sta[0]=2\n";
+        let status = parse_hostapd_status(output);
+        assert!(status.is_running);
+        assert!(status.ap_is_up);
+        assert_eq!(status.station_count, 2);
+        assert_eq!(status.ssid, "TestNet");
+    }
+
+    #[test]
+    fn parse_hostapd_status_starting() {
+        let output = "state=BEACONING\n";
+        let status = parse_hostapd_status(output);
+        assert!(status.is_running);
+        assert!(!status.ap_is_up);
+    }
+
+    #[test]
+    fn parse_hostapd_status_counts_multiple_stations() {
+        let output = "state=ENABLED\nssid=Test\nnum_sta[0]=3\nnum_sta[1]=1\n";
+        let status = parse_hostapd_status(output);
+        assert_eq!(status.station_count, 4);
+    }
+
+    #[test]
+    fn lifecycle_monitor_state_transitions() {
+        let mut monitor = ApLifecycleMonitor::new("wlan0");
+        assert_eq!(monitor.state(), ApState::Down);
+
+        // Starting -> Up.
+        let status = HostapdStatus {
+            is_running: true,
+            ap_is_up: false,
+            station_count: 0,
+            ssid: String::new(),
+            fields: HashMap::new(),
+        };
+        let transition = monitor.update_from_status(&status);
+        assert_eq!(transition, Some(ApState::Starting));
+        assert_eq!(monitor.state(), ApState::Starting);
+
+        // Up.
+        let status = HostapdStatus {
+            is_running: true,
+            ap_is_up: true,
+            station_count: 0,
+            ssid: "Test".to_string(),
+            fields: HashMap::new(),
+        };
+        let transition = monitor.update_from_status(&status);
+        assert_eq!(transition, Some(ApState::Up));
+        assert_eq!(monitor.state(), ApState::Up);
+    }
+
+    #[test]
+    fn lifecycle_monitor_crash_detection() {
+        let mut monitor = ApLifecycleMonitor::new("wlan0");
+
+        // Start -> Up.
+        let status = HostapdStatus {
+            is_running: true,
+            ap_is_up: true,
+            station_count: 0,
+            ssid: "Test".to_string(),
+            fields: HashMap::new(),
+        };
+        monitor.update_from_status(&status);
+        assert_eq!(monitor.state(), ApState::Up);
+
+        // Crash -> Failed.
+        let status = HostapdStatus {
+            is_running: false,
+            ap_is_up: false,
+            station_count: 0,
+            ssid: String::new(),
+            fields: HashMap::new(),
+        };
+        let transition = monitor.update_from_status(&status);
+        assert_eq!(transition, Some(ApState::Failed));
+    }
+
+    #[test]
+    fn lifecycle_monitor_no_change_returns_none() {
+        let mut monitor = ApLifecycleMonitor::new("wlan0");
+        let status = HostapdStatus {
+            is_running: false,
+            ap_is_up: false,
+            station_count: 0,
+            ssid: String::new(),
+            fields: HashMap::new(),
+        };
+        // First call: Down -> Down = no change.
+        let transition = monitor.update_from_status(&status);
+        assert_eq!(transition, None);
+    }
+
+    #[test]
+    fn lifecycle_monitor_mark_down() {
+        let mut monitor = ApLifecycleMonitor::new("wlan0");
+        let status = HostapdStatus {
+            is_running: true,
+            ap_is_up: true,
+            station_count: 0,
+            ssid: "Test".to_string(),
+            fields: HashMap::new(),
+        };
+        monitor.update_from_status(&status);
+        assert_eq!(monitor.state(), ApState::Up);
+
+        let transition = monitor.mark_down();
+        assert_eq!(transition, Some(ApState::Down));
+        assert_eq!(monitor.state(), ApState::Down);
+
+        // Mark down again -> no change.
+        assert_eq!(monitor.mark_down(), None);
+    }
+
+    #[test]
+    fn lifecycle_monitor_mark_failed() {
+        let mut monitor = ApLifecycleMonitor::new("wlan0");
+        let transition = monitor.mark_failed();
+        assert_eq!(transition, Some(ApState::Failed));
+
+        // Mark failed again -> no change.
+        assert_eq!(monitor.mark_failed(), None);
+    }
+
+    #[tokio::test]
+    async fn monitor_hostapd_detects_up() {
+        let querier = MockHostapdStatusQuerier::new();
+        querier.add_status_response("state=ENABLED\nssid=TestNet\n");
+        querier.set_process_running(1000, true);
+
+        let process = HostapdProcess {
+            config_path: PathBuf::from("/tmp/test.conf"),
+            pid: 1000,
+        };
+
+        let status = monitor_hostapd(&process, &querier, 10).await;
+        assert!(status.ap_is_up);
+        assert_eq!(status.ssid, "TestNet");
+    }
+
+    #[tokio::test]
+    async fn monitor_hostapd_detects_crash() {
+        let querier = MockHostapdStatusQuerier::new();
+        // Process is not running from the start.
+        querier.set_process_running(1000, false);
+
+        let process = HostapdProcess {
+            config_path: PathBuf::from("/tmp/test.conf"),
+            pid: 1000,
+        };
+
+        let status = monitor_hostapd(&process, &querier, 10).await;
+        assert!(!status.ap_is_up);
     }
 }
