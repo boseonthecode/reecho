@@ -7,6 +7,7 @@ mod activation;
 mod ap;
 mod config;
 mod dbus;
+mod devices;
 mod error;
 mod network;
 
