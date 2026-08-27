@@ -78,7 +78,7 @@ pub fn parse_ip_neigh(output: &str) -> HashMap<String, String> {
 /// Resolve a hostname from a MAC address using reverse DNS or `/proc/net/arp`.
 ///
 /// Falls back to the MAC address if resolution fails.
-pub async fn resolve_hostname(mac: &str, runner: &(impl CommandRunner + Sync)) -> String {
+pub async fn resolve_hostname(mac: &str, _runner: &(impl CommandRunner + Sync)) -> String {
     // Try to get hostname from `avahi-resolve` or system ARP table.
     // For v1, just return the MAC as the name.
     mac.to_string()

@@ -263,6 +263,9 @@ mod tests {
             password: "testpassword123".to_string(),
             band: reecho_shared::Band::Band5Ghz,
             data_limit: 0,
+            blacklist: Vec::new(),
+            auto_on: None,
+            auto_off: None,
         }
     }
 
