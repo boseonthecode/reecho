@@ -5,6 +5,7 @@
 
 mod activation;
 mod ap;
+mod blacklist;
 mod config;
 mod dbus;
 mod devices;
