@@ -8,3 +8,5 @@ description = "Reecho command-line interface"
 [dependencies]
 reecho-shared = { path = "../shared" }
 clap = { version = "4", features = ["derive"] }
+zbus = { version = "5", features = ["tokio", "bus-impl"] }
+tokio = { version = "1", features = ["rt", "macros"] }
