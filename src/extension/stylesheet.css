@@ -1,0 +1,19 @@
+/* Reecho GNOME Shell extension styles */
+
+/* Toggle button active state */
+.quick-toggle-active {
+    background-color: rgb(53, 132, 228);
+    color: white;
+}
+
+/* Status indicator */
+reecho-status {
+    padding: 8px 12px;
+}
+
+/* Warning banner */
+reecho-warning {
+    color: rgb(229, 165, 10);
+    font-weight: bold;
+    padding: 4px 8px;
+}

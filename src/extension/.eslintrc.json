@@ -1,0 +1,22 @@
+{
+  "env": {
+    "es2020": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2020,
+    "sourceType": "module"
+  },
+  "extends": ["eslint:recommended"],
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-undef": "error"
+  },
+  "globals": {
+    "globalThis": "readonly",
+    "imports": "readonly",
+    "log": "readonly",
+    "logError": "readonly",
+    "extension": "readonly",
+    "gettext": "readonly"
+  }
+}

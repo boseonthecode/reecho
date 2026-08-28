@@ -1,0 +1,9 @@
+{
+  "uuid": "reecho@reecho",
+  "name": "Reecho",
+  "description": "Mobile hotspot for Linux — stay connected and share your Wi-Fi simultaneously",
+  "version": 1,
+  "shell-version": ["45", "46", "47"],
+  "url": "https://github.com/reecho/reecho",
+  "settings-schema": "org.gnome.shell.extensions.reecho"
+}
