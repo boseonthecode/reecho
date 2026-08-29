@@ -1,0 +1,55 @@
+app-id: com.reecho.Reecho
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: reecho-cli
+
+finish-args:
+  # D-Bus: talk to NetworkManager on system bus
+  - --system-talk-name=org.freedesktop.NetworkManager
+  # D-Bus: talk to systemd on system bus (for hostapd)
+  - --system-talk-name=org.freedesktop.systemd1
+  # D-Bus: own session bus name for the service
+  - --own-name=org.reecho.Service
+  # D-Bus: talk to session bus (for GNOME Shell extension)
+  - --talk-name=org.gnome.Shell
+  # Access hostapd control interface (typically /var/run/hostapd/)
+  - --filesystem=/var/run/hostapd:create
+  # Access /proc/net for bandwidth monitoring
+  - --proc=/proc
+  # Access network interfaces for AP management
+  - --device=dri
+  - --socket=network
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/reecho/cargo
+
+modules:
+  - name: reecho
+    buildsystem: simple
+    build-commands:
+      # Build all crates
+      - cargo --offline build --release --all
+      # Install the service binary
+      - install -Dm755 target/release/reecho-service /app/bin/reecho-service
+      # Install the CLI binary
+      - install -Dm755 target/release/reecho-cli /app/bin/reecho-cli
+      # Install the GNOME Shell extension
+      - install -d /app/share/gnome-shell/extensions/reecho@reecho.com
+      - cp src/extension/extension.js /app/share/gnome-shell/extensions/reecho@reecho.com/
+      - cp src/extension/dbusClient.js /app/share/gnome-shell/extensions/reecho@reecho.com/
+      - cp src/extension/ui.js /app/share/gnome-shell/extensions/reecho@reecho.com/
+      - cp src/extension/constants.js /app/share/gnome-shell/extensions/reecho@reecho.com/
+      - cp src/extension/stylesheet.css /app/share/gnome-shell/extensions/reecho@reecho.com/
+      - cp src/extension/metadata.json /app/share/gnome-shell/extensions/reecho@reecho.com/
+      # Install systemd user unit
+      - install -Dm644 packaging/com.reecho.Reecho.service /app/share/systemd/user/com.reecho.Reecho.service
+      # Install D-Bus session service file
+      - install -Dm644 packaging/com.reecho.Reecho.service.dbus /app/share/dbus-1/services/com.reecho.Reecho.service
+    sources:
+      - type: dir
+        path: ..

@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.reecho.Service
+Exec=/app/bin/reecho-service
+User=%u
+SystemdService=com.reecho.Reecho.service

@@ -1,0 +1,29 @@
+[Unit]
+Description=Reecho Hotspot Service
+Documentation=https://github.com/reecho/reecho
+After=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.reecho.Service
+ExecStart=/app/bin/reecho-service
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/reecho
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+
+# Network access for NM/hostapd management
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target
