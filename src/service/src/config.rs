@@ -31,6 +31,9 @@ pub struct Config {
     /// Auto-off time (HH:MM format, 24h). None = disabled.
     #[serde(default)]
     pub auto_off: Option<String>,
+    /// Repeat rule for schedule (daily, weekdays, weekends, once).
+    #[serde(default = "default_schedule_repeat")]
+    pub schedule_repeat: String,
 }
 
 impl Default for Config {
@@ -43,6 +46,7 @@ impl Default for Config {
             blacklist: Vec::new(),
             auto_on: None,
             auto_off: None,
+            schedule_repeat: default_schedule_repeat(),
         }
     }
 }
@@ -135,6 +139,13 @@ impl Config {
                 )));
             }
         }
+        // Validate schedule repeat rule.
+        if !is_valid_repeat(&self.schedule_repeat) {
+            return Err(ServiceError::InvalidInput(format!(
+                "invalid schedule_repeat: {} (expected daily, weekdays, weekends, or once)",
+                self.schedule_repeat
+            )));
+        }
         Ok(())
     }
 }
@@ -169,6 +180,21 @@ fn is_valid_time(time: &str) -> bool {
     h < 24 && m < 60
 }
 
+/// Check if a string is a valid repeat rule.
+fn is_valid_repeat(repeat: &str) -> bool {
+    matches!(
+        repeat.to_lowercase().as_str(),
+        "daily"
+            | "everyday"
+            | "every day"
+            | "weekdays"
+            | "mon-fri"
+            | "weekends"
+            | "sat-sun"
+            | "once"
+    )
+}
+
 /// Return the config file path: `~/.config/reecho/config.toml`.
 fn config_path() -> PathBuf {
     let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -195,6 +221,11 @@ fn default_password() -> String {
             CHARSET[idx] as char
         })
         .collect()
+}
+
+/// Default schedule repeat rule.
+fn default_schedule_repeat() -> String {
+    "daily".to_string()
 }
 
 /// Re-export ServiceError for use in this module.
@@ -305,6 +336,7 @@ mod tests {
         config.auto_on = Some("08:30".to_string());
         config.auto_off = Some("22:00".to_string());
         config.data_limit = 1_000_000_000;
+        config.schedule_repeat = "weekdays".to_string();
 
         let contents = toml::to_string_pretty(&config).unwrap();
         fs::write(&path, contents).unwrap();
@@ -326,6 +358,7 @@ mod tests {
         assert_eq!(loaded.auto_on.as_deref(), Some("08:30"));
         assert_eq!(loaded.auto_off.as_deref(), Some("22:00"));
         assert_eq!(loaded.data_limit, 1_000_000_000);
+        assert_eq!(loaded.schedule_repeat, "weekdays");
     }
 
     #[test]
@@ -372,6 +405,29 @@ mod tests {
         let mut config = Config::default();
         config.auto_on = None;
         config.auto_off = None;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_invalid_repeat() {
+        let mut config = Config::default();
+        config.schedule_repeat = "monthly".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_valid_repeats() {
+        for repeat in &["daily", "weekdays", "weekends", "once"] {
+            let mut config = Config::default();
+            config.schedule_repeat = repeat.to_string();
+            assert!(config.validate().is_ok(), "failed for repeat: {repeat}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_case_insensitive_repeat() {
+        let mut config = Config::default();
+        config.schedule_repeat = "Daily".to_string();
         assert!(config.validate().is_ok());
     }
 }

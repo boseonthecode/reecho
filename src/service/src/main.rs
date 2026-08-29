@@ -10,7 +10,9 @@ mod config;
 mod dbus;
 mod devices;
 mod error;
+mod limits;
 mod network;
+mod scheduler;
 
 use zbus::connection::Builder;
 

@@ -266,6 +266,7 @@ mod tests {
             blacklist: Vec::new(),
             auto_on: None,
             auto_off: None,
+            schedule_repeat: "daily".to_string(),
         }
     }
 

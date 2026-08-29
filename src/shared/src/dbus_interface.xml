@@ -55,5 +55,17 @@
     <signal name="Warning">
       <arg name="message" type="s"/>
     </signal>
+    <method name="GetSchedule">
+      <arg name="on_time" type="s" direction="out"/>
+      <arg name="off_time" type="s" direction="out"/>
+      <arg name="repeat" type="s" direction="out"/>
+      <arg name="enabled" type="b" direction="out"/>
+    </method>
+    <method name="SetSchedule">
+      <arg name="on_time" type="s" direction="in"/>
+      <arg name="off_time" type="s" direction="in"/>
+      <arg name="repeat" type="s" direction="in"/>
+      <arg name="enabled" type="b" direction="in"/>
+    </method>
   </interface>
 </node>

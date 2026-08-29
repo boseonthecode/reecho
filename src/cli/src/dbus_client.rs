@@ -127,4 +127,31 @@ impl ReechoClient {
         self.proxy.call_method("SetDataLimit", &(bytes,)).await?;
         Ok(())
     }
+
+    /// Get the current auto on/off schedule.
+    pub async fn get_schedule(
+        &self,
+    ) -> Result<(String, String, String, bool), Box<dyn std::error::Error>> {
+        let schedule: (String, String, String, bool) = self
+            .proxy
+            .call_method("GetSchedule", &())
+            .await?
+            .body()
+            .deserialize()?;
+        Ok(schedule)
+    }
+
+    /// Set the auto on/off schedule.
+    pub async fn set_schedule(
+        &self,
+        on_time: &str,
+        off_time: &str,
+        repeat: &str,
+        enabled: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.proxy
+            .call_method("SetSchedule", &(on_time, off_time, repeat, enabled))
+            .await?;
+        Ok(())
+    }
 }
