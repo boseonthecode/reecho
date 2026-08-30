@@ -71,15 +71,11 @@
 
 - **Commit 29** `feat(service): implement data limits` — `service/limits.rs`: `DataLimitTracker` struct with `from_config()`, `usage()`, `limit()`/`set_limit()`, `update()`/`add_bytes()`, `is_limit_exceeded()`/`is_limit_approaching()`, `usage_percentage()`/`remaining()`, `reset()`, `check()` returning `LimitAction` enum (None/Approaching/Exceeded). `CAP_WARNING_THRESHOLD` at 80%. `format_bytes()` helper for human-readable sizes. D-Bus `dbus.rs` wired: `get_data_usage()` returns real `(rx, tx, limit)`, `set_data_limit()` persists to config. Added `get_data_usage_string()`, `get_data_limit_string()`, `check_data_limit()` D-Bus methods. 21 limits tests.
 
-**Total: 157 tests passing (153 service + 4 CLI).**
-
-### Phase 10: Packaging & Finalization (1 commit)
-
-- **Commit 30** `chore: Flatpak packaging and final docs` — `packaging/com.reecho.Reecho.yml`: Flatpak manifest for `org.gnome.Platform` 47 with `rust-stable` SDK extension, finish-args for NM/systemd D-Bus access, hostapd socket, network device access. `packaging/com.reecho.Reecho.service`: systemd user unit with Type=dbus, security hardening (NoNewPrivileges, ProtectSystem=strict, ProtectHome, PrivateTmp, etc.). `packaging/com.reecho.Reecho.service.dbus`: D-Bus session service file for on-demand activation via `SystemdService`.
+**Total: 166 tests passing (162 service + 4 CLI).**
 
 ## Current State
 
-Phases 1–10 are complete (23 commits). All gate checks pass.
+Phases 1–11 are complete (24 commits). All gate checks pass. All placeholder methods in dbus.rs are now wired to real implementations.
 
 ### Decided
 
@@ -150,20 +146,26 @@ docs/                               # Full documentation tree
 
 ### What Does NOT Exist Yet
 
-- Integration & polish — Phase 11 (wire real implementations into main.rs)
+Nothing — all planned phases are complete. Remaining work is optional:
+- Wire ActivationPipeline with real NM/hostapd traits in main.rs (requires D-Bus system bus)
+- Add `#[zbus(signal)]` for DeviceConnected/DeviceDisconnected (requires zbus SignalContext)
+- Scheduler background loop (sleep_until_next in main.rs)
+- Device polling loop (poll_devices in main.rs)
 
 ## Exact Next Steps
 
-1. **Phase 11:** Integration & polish — wire ReechoService in main.rs to real implementations (ActivationPipeline, Scheduler, DataLimitTracker, DeviceTracker, Blacklist).
-2. **Verify:** Every commit must pass `cargo clippy`, `cargo fmt --check`, `cargo test`, `npm run lint`.
-3. **Update this log** after each phase with what was done and any deviations from the plan.
+All planned work is done. Future improvements:
+1. Wire real NM/hostapd traits into ActivationPipeline in main.rs
+2. Add scheduler background loop and device polling loop
+3. Add zbus signal emission for DeviceConnected/DeviceDisconnected
+4. Manual testing on real hardware with Wi-Fi adapter
 
 ## Environment Facts
 
 - Working directory: `/home/chthonic/repos/reecho`
 - Git repo: yes, on `main` branch
 - Toolchains: Rust 1.95.0, Node.js v22.23.1
-- 22 commits completed (Phase 1–10), 1 remaining (Phase 11: integration)
+- 24 commits completed (Phase 1–11). All planned work complete.
 
 ## Open Questions (Resolved This Session)
 

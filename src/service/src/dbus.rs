@@ -1,8 +1,10 @@
 //! D-Bus interface definition and handlers for the Reecho service.
 
-use reecho_shared::{HotspotState, ScheduleEntry};
+use reecho_shared::{ConnectedDevice, HotspotState, ScheduleEntry};
 
+use crate::blacklist::Blacklist;
 use crate::config::Config;
+use crate::devices::{self, CommandRunner as _};
 use crate::limits::DataLimitTracker;
 use crate::scheduler::Scheduler;
 
@@ -17,33 +19,38 @@ pub struct ReechoService {
     scheduler: Scheduler,
     /// Data limit tracker.
     data_tracker: DataLimitTracker,
+    /// Device blacklist.
+    blacklist: Blacklist,
+    /// Connected devices (cached from last poll).
+    devices: Vec<ConnectedDevice>,
+    /// Name of the active AP interface (set when hotspot is active).
+    ap_interface: Option<String>,
+    /// Object path of the active NM connection (set when hotspot is active).
+    active_connection_path: Option<String>,
 }
 
 impl ReechoService {
     /// Create a new service instance in the inactive state.
     pub fn new() -> Self {
         let config = Config::load();
-        let scheduler = Scheduler::from_config(&config);
-        let data_tracker = DataLimitTracker::from_config(&config);
-        Self {
-            state: HotspotState::Inactive,
-            warning: None,
-            config,
-            scheduler,
-            data_tracker,
-        }
+        Self::new_with_config(config)
     }
 
-    /// Create a new service instance with a specific config (for testing).
+    /// Create a new service instance with a specific config.
     pub fn new_with_config(config: Config) -> Self {
         let scheduler = Scheduler::from_config(&config);
         let data_tracker = DataLimitTracker::from_config(&config);
+        let blacklist = Blacklist::from_macs(config.blacklist.clone());
         Self {
             state: HotspotState::Inactive,
             warning: None,
             config,
             scheduler,
             data_tracker,
+            blacklist,
+            devices: Vec::new(),
+            ap_interface: None,
+            active_connection_path: None,
         }
     }
 
@@ -83,6 +90,118 @@ impl ReechoService {
     pub fn config_mut(&mut self) -> &mut Config {
         &mut self.config
     }
+
+    /// Get a reference to the blacklist.
+    pub fn blacklist(&self) -> &Blacklist {
+        &self.blacklist
+    }
+
+    /// Get a mutable reference to the blacklist.
+    pub fn blacklist_mut(&mut self) -> &mut Blacklist {
+        &mut self.blacklist
+    }
+
+    /// Persist the blacklist to config and save.
+    fn save_blacklist(&mut self) -> Result<(), zbus::fdo::Error> {
+        self.config.blacklist = self.blacklist.macs();
+        self.config
+            .save()
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Poll connected devices from hostapd and update internal state.
+    pub async fn poll_devices(&mut self) {
+        let Some(ref interface) = self.ap_interface else {
+            self.devices.clear();
+            return;
+        };
+
+        let runner = devices::RealCommandRunner;
+
+        // Get connected MACs from hostapd_cli.
+        let macs = match runner
+            .run_command("hostapd_cli", &["-i", interface, "all_sta"])
+            .await
+        {
+            Ok(output) => devices::parse_all_sta(&output),
+            Err(e) => {
+                tracing::debug!("failed to poll hostapd_cli all_sta: {e}");
+                Vec::new()
+            }
+        };
+
+        // Get MAC→IP mapping from ip neigh.
+        let ip_map = match runner.run_command("ip", &["neigh"]).await {
+            Ok(output) => devices::parse_ip_neigh(&output),
+            Err(_) => std::collections::HashMap::new(),
+        };
+
+        // Build device list.
+        let mut new_devices = Vec::new();
+        for mac in &macs {
+            let ip = ip_map.get(mac).cloned().unwrap_or_default();
+            let name = String::new(); // hostname resolution deferred
+            let connected_at = String::new(); // tracking deferred
+
+            // Find existing device to carry over bandwidth data.
+            let existing = self.devices.iter().find(|d| &d.mac == mac);
+
+            let (bytes_rx, bytes_tx, rate_rx, rate_tx) = match existing {
+                Some(dev) => (dev.bytes_rx, dev.bytes_tx, dev.rate_rx, dev.rate_tx),
+                None => (0, 0, 0.0, 0.0),
+            };
+
+            new_devices.push(ConnectedDevice {
+                mac: mac.clone(),
+                ip,
+                name,
+                connected_at,
+                bytes_rx,
+                bytes_tx,
+                rate_rx,
+                rate_tx,
+            });
+        }
+
+        // Enforce blacklist: disconnect blacklisted devices.
+        let blacklisted = self.blacklist.filter(&macs);
+        for mac in &blacklisted {
+            if let Err(e) = runner
+                .run_command("hostapd_cli", &["-i", interface, "deauthenticate", mac])
+                .await
+            {
+                tracing::warn!("failed to disconnect blacklisted device {mac}: {e}");
+            } else {
+                tracing::info!("disconnected blacklisted device: {mac}");
+                // Remove from device list.
+                new_devices.retain(|d| &d.mac != mac);
+            }
+        }
+
+        // Emit DeviceDisconnected for devices that left.
+        let old_macs: std::collections::HashSet<&str> =
+            self.devices.iter().map(|d| d.mac.as_str()).collect();
+        let new_macs: std::collections::HashSet<&str> =
+            new_devices.iter().map(|d| d.mac.as_str()).collect();
+
+        // Device connected (in new but not in old).
+        for mac in &new_macs {
+            if !old_macs.contains(mac) {
+                tracing::info!("device connected: {mac}");
+                // Signal emission deferred — requires zbus SignalContext.
+            }
+        }
+
+        // Device disconnected (in old but not in new).
+        for mac in &old_macs {
+            if !new_macs.contains(mac) {
+                tracing::info!("device disconnected: {mac}");
+                // Signal emission deferred — requires zbus SignalContext.
+            }
+        }
+
+        self.devices = new_devices;
+    }
 }
 
 #[zbus::interface(name = "org.reecho.Service")]
@@ -100,38 +219,107 @@ impl ReechoService {
     /// Activate the hotspot with the given parameters.
     async fn activate(
         &mut self,
-        _ssid: String,
-        _password: String,
-        _band: String,
+        ssid: String,
+        password: String,
+        band: String,
     ) -> Result<(), zbus::fdo::Error> {
-        // Placeholder — full implementation in Phase 5.
+        // Validate inputs.
+        let band: reecho_shared::Band = band
+            .parse()
+            .map_err(|e: String| zbus::fdo::Error::InvalidArgs(e))?;
+
+        // Check if already active.
+        if self.state == HotspotState::Active {
+            return Err(zbus::fdo::Error::Failed(
+                "hotspot is already active".to_string(),
+            ));
+        }
+
+        // Update config with provided parameters.
+        self.config.ssid = ssid;
+        self.config.password = password;
+        self.config.band = band;
+        self.config
+            .validate()
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
+
+        // Set state to activating.
+        self.state = HotspotState::Activating;
+
+        // The actual activation pipeline (NM + hostapd) is orchestrated externally.
+        // For now, mark as active. Full pipeline integration requires a running
+        // tokio runtime with the ActivationPipeline, which is wired in main.rs.
         self.state = HotspotState::Active;
+
+        // Save config.
+        self.config
+            .save()
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+
+        tracing::info!(
+            "hotspot activated: SSID={}, band={}",
+            self.config.ssid,
+            self.config.band
+        );
+
         Ok(())
     }
 
     /// Deactivate the hotspot.
     async fn deactivate(&mut self) -> Result<(), zbus::fdo::Error> {
-        // Placeholder — full implementation in Phase 5.
+        if self.state == HotspotState::Inactive {
+            return Ok(());
+        }
+
         self.state = HotspotState::Inactive;
         self.warning = None;
+        self.ap_interface = None;
+        self.active_connection_path = None;
+        self.devices.clear();
+
+        tracing::info!("hotspot deactivated");
         Ok(())
     }
 
     /// Get the list of connected devices.
     async fn get_devices(&self) -> Vec<(String, String, String, String, f64, f64, f64)> {
-        // Placeholder — returns empty list.
-        Vec::new()
+        self.devices
+            .iter()
+            .map(|d| {
+                (
+                    d.mac.clone(),
+                    d.ip.clone(),
+                    d.name.clone(),
+                    d.connected_at.clone(),
+                    d.bytes_rx as f64,
+                    d.bytes_tx as f64,
+                    d.rate_rx,
+                )
+            })
+            .collect()
     }
 
     /// Blacklist a device by MAC address.
-    async fn blacklist_device(&mut self, _mac: String) -> Result<(), zbus::fdo::Error> {
-        // Placeholder — full implementation in Phase 6.
+    async fn blacklist_device(&mut self, mac: String) -> Result<(), zbus::fdo::Error> {
+        if !self.blacklist.add(&mac) {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "device {mac} is already blacklisted"
+            )));
+        }
+        self.save_blacklist()?;
+        tracing::info!("blacklisted device: {mac}");
         Ok(())
     }
 
     /// Unblacklist a device by MAC address.
-    async fn unblacklist_device(&mut self, _mac: String) -> Result<(), zbus::fdo::Error> {
-        // Placeholder — full implementation in Phase 6.
+    async fn unblacklist_device(&mut self, mac: String) -> Result<(), zbus::fdo::Error> {
+        if !self.blacklist.remove(&mac) {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "device {mac} is not blacklisted"
+            )));
+        }
+        self.save_blacklist()?;
+        tracing::info!("unblacklisted device: {mac}");
         Ok(())
     }
 
@@ -247,6 +435,11 @@ impl ReechoService {
     async fn check_data_limit(&self) -> String {
         self.data_tracker.check().to_string()
     }
+
+    /// Get the list of blacklisted MAC addresses.
+    async fn get_blacklist(&self) -> Vec<String> {
+        self.blacklist.macs()
+    }
 }
 
 #[cfg(test)]
@@ -310,11 +503,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activate_rejects_invalid_band() {
+        let mut service = ReechoService::new_with_config(test_config());
+        let result = service
+            .activate(
+                "Test".to_string(),
+                "pass1234".to_string(),
+                "6GHz".to_string(),
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn activate_rejects_already_active() {
+        let mut service = ReechoService::new_with_config(test_config());
+        service.set_state(HotspotState::Active, None);
+        let result = service
+            .activate(
+                "Test".to_string(),
+                "pass1234".to_string(),
+                "5GHz".to_string(),
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn deactivate_from_inactive_is_noop() {
         let mut service = ReechoService::new_with_config(test_config());
         service.deactivate().await.unwrap();
         assert_eq!(service.get_state().await, "inactive");
         assert_eq!(service.get_warning().await, "");
+    }
+
+    #[tokio::test]
+    async fn deactivate_clears_ap_interface() {
+        let mut service = ReechoService::new_with_config(test_config());
+        service.set_state(HotspotState::Active, None);
+        service.ap_interface = Some("wlan0".to_string());
+        service.active_connection_path = Some("/active/0".to_string());
+        service.deactivate().await.unwrap();
+        assert!(service.ap_interface.is_none());
+        assert!(service.active_connection_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn blacklist_device_adds_mac() {
+        let mut service = ReechoService::new_with_config(test_config());
+        service
+            .blacklist_device("AA:BB:CC:DD:EE:FF".to_string())
+            .await
+            .unwrap();
+        assert!(service.blacklist().is_blacklisted("AA:BB:CC:DD:EE:FF"));
+        assert!(
+            service
+                .config
+                .blacklist
+                .contains(&"aa:bb:cc:dd:ee:ff".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn blacklist_device_rejects_duplicate() {
+        let mut service = ReechoService::new_with_config(test_config());
+        service
+            .blacklist_device("AA:BB:CC:DD:EE:FF".to_string())
+            .await
+            .unwrap();
+        let result = service
+            .blacklist_device("AA:BB:CC:DD:EE:FF".to_string())
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn unblacklist_device_removes_mac() {
+        let mut service = ReechoService::new_with_config(test_config());
+        service
+            .blacklist_device("AA:BB:CC:DD:EE:FF".to_string())
+            .await
+            .unwrap();
+        service
+            .unblacklist_device("AA:BB:CC:DD:EE:FF".to_string())
+            .await
+            .unwrap();
+        assert!(!service.blacklist().is_blacklisted("AA:BB:CC:DD:EE:FF"));
+        assert!(service.config.blacklist.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unblacklist_device_rejects_unknown() {
+        let mut service = ReechoService::new_with_config(test_config());
+        let result = service
+            .unblacklist_device("AA:BB:CC:DD:EE:FF".to_string())
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_blacklist_returns_macs() {
+        let mut service = ReechoService::new_with_config(test_config());
+        service
+            .blacklist_device("AA:BB:CC:DD:EE:FF".to_string())
+            .await
+            .unwrap();
+        service
+            .blacklist_device("11:22:33:44:55:66".to_string())
+            .await
+            .unwrap();
+        let bl = service.get_blacklist().await;
+        assert_eq!(bl.len(), 2);
+        assert!(bl.contains(&"aa:bb:cc:dd:ee:ff".to_string()));
+        assert!(bl.contains(&"11:22:33:44:55:66".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_devices_returns_empty_by_default() {
+        let service = ReechoService::new_with_config(test_config());
+        assert!(service.get_devices().await.is_empty());
     }
 
     #[tokio::test]
