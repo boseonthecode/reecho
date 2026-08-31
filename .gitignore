@@ -21,3 +21,7 @@ Thumbs.db
 # Node.js
 node_modules/
 package-lock.json
+
+# Docs — local-only, update when required but never commit
+docs/
+AGENTS.md
