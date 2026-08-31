@@ -667,6 +667,148 @@ pub async fn deactivate_ap_sta(
     Ok(())
 }
 
+/// Real NetworkManager connection operations via D-Bus.
+pub struct RealNetworkManagerConnection {
+    connection: Connection,
+}
+
+impl RealNetworkManagerConnection {
+    /// Create a new client connected to the system bus.
+    pub async fn new() -> Result<Self, NetworkError> {
+        let connection = Connection::system()
+            .await
+            .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+        Ok(Self { connection })
+    }
+
+    /// Create a client from an existing connection.
+    pub fn from_connection(connection: Connection) -> Self {
+        Self { connection }
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkManagerConnectionOps for RealNetworkManagerConnection {
+    async fn add_and_activate_connection(
+        &self,
+        connection_settings: &ConnectionSettings,
+        device_path: &str,
+    ) -> Result<String, NetworkError> {
+        use std::collections::HashMap;
+        use zbus::zvariant::{ObjectPath, Value};
+
+        let variant_settings: HashMap<String, HashMap<String, Value<'_>>> = connection_settings
+            .iter()
+            .map(|(section, inner)| {
+                let variant_inner: HashMap<String, Value<'_>> = inner
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::new(v.clone())))
+                    .collect();
+                (section.clone(), variant_inner)
+            })
+            .collect();
+
+        let device_path = ObjectPath::try_from(device_path.to_string())
+            .map_err(|e| NetworkError::Dbus(format!("invalid device path: {e}")))?;
+        let nm_path = ObjectPath::try_from("/").map_err(|e| NetworkError::Dbus(e.to_string()))?;
+
+        let proxy = zbus::Proxy::new(
+            &self.connection,
+            NM_NAME,
+            NM_PATH,
+            "org.freedesktop.NetworkManager",
+        )
+        .await
+        .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+
+        let reply = proxy
+            .call_method(
+                "AddAndActivateConnection",
+                &(variant_settings, device_path, nm_path),
+            )
+            .await
+            .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+        let body = reply.body();
+        let (active_path, _): (ObjectPath<'_>, ObjectPath<'_>) = body
+            .deserialize()
+            .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+
+        Ok(active_path.to_string())
+    }
+
+    async fn deactivate_connection(
+        &self,
+        active_connection_path: &str,
+    ) -> Result<(), NetworkError> {
+        let active_path = zbus::zvariant::ObjectPath::try_from(active_connection_path.to_string())
+            .map_err(|e| NetworkError::Dbus(format!("invalid active path: {e}")))?;
+
+        let proxy = zbus::Proxy::new(
+            &self.connection,
+            NM_NAME,
+            NM_PATH,
+            "org.freedesktop.NetworkManager",
+        )
+        .await
+        .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+
+        proxy
+            .call_method("DeactivateConnection", &(active_path,))
+            .await
+            .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn delete_connection(&self, connection_path: &str) -> Result<(), NetworkError> {
+        let proxy = zbus::Proxy::new(
+            &self.connection,
+            NM_NAME,
+            connection_path,
+            "org.freedesktop.NetworkManager.Settings.Connection",
+        )
+        .await
+        .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+
+        proxy
+            .call_method("Delete", &())
+            .await
+            .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn get_connection_profile(
+        &self,
+        active_connection_path: &str,
+    ) -> Result<String, NetworkError> {
+        let proxy = zbus::Proxy::new(
+            &self.connection,
+            NM_NAME,
+            active_connection_path,
+            "org.freedesktop.DBus.Properties",
+        )
+        .await
+        .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+
+        let profile: String = proxy
+            .call_method(
+                "Get",
+                &(
+                    "org.freedesktop.NetworkManager.Connection.Active",
+                    "Connection",
+                ),
+            )
+            .await
+            .map_err(|e| NetworkError::Dbus(e.to_string()))?
+            .body()
+            .deserialize()
+            .map_err(|e| NetworkError::Dbus(e.to_string()))?;
+
+        Ok(profile)
+    }
+}
+
 /// Mock NetworkManager connection operations for testing.
 pub struct MockNetworkManagerConnection {
     next_id: std::sync::atomic::AtomicU32,
