@@ -18,7 +18,7 @@ use crate::network::{
 };
 
 /// Result of an activation attempt.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ActivationResult {
     /// Final state after activation.
     pub state: HotspotState,
@@ -26,6 +26,8 @@ pub struct ActivationResult {
     pub warning: Option<String>,
     /// AP interface name if successfully activated.
     pub ap_interface: Option<String>,
+    /// hostapd process handle for later teardown.
+    pub process: Option<HostapdProcess>,
 }
 
 /// Result of a deactivation attempt.
@@ -155,6 +157,7 @@ impl ActivationPipeline {
             state: HotspotState::Active,
             warning: ap_result.warning,
             ap_interface: Some(ap_interface.to_string()),
+            process: Some(process),
         })
     }
 

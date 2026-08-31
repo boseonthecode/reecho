@@ -58,7 +58,7 @@ impl std::fmt::Display for RepeatRule {
 }
 
 /// Parsed schedule with times as seconds-since-midnight.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSchedule {
     /// Auto-on time in seconds since midnight.
     pub on_seconds: u32,
@@ -120,6 +120,7 @@ pub fn now_epoch_secs() -> u64 {
 }
 
 /// The scheduler manages auto on/off timing.
+#[derive(Clone, Debug)]
 pub struct Scheduler {
     /// Parsed schedule, if any.
     schedule: Option<ParsedSchedule>,
