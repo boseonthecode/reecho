@@ -2,6 +2,8 @@
 //!
 //! Orchestrates: Wi-Fi state check → AP+STA config → hostapd start → AP up detection.
 
+use std::sync::Arc;
+
 use reecho_shared::HotspotState;
 
 use crate::ap::{
@@ -35,22 +37,23 @@ pub struct DeactivationResult {
 
 /// The activation pipeline orchestrates the full hotspot lifecycle.
 ///
-/// Uses trait objects so all external dependencies can be mocked in tests.
-pub struct ActivationPipeline<'a> {
-    nm_ops: &'a (dyn NetworkManagerOps + Sync),
-    nm_conn: &'a (dyn NetworkManagerConnectionOps + Sync),
-    cmd_runner: &'a (dyn CommandRunner + Sync),
-    spawner: &'a (dyn HostapdSpawner + Sync),
-    querier: &'a (dyn HostapdStatusQuerier + Sync),
+/// Uses owned trait objects (`Arc<dyn>`) so it can be shared via `Arc<Mutex<>>`
+/// with D-Bus handlers and background loops (Phase 11).
+pub struct ActivationPipeline {
+    nm_ops: Arc<dyn NetworkManagerOps + Sync + Send>,
+    nm_conn: Arc<dyn NetworkManagerConnectionOps + Sync + Send>,
+    cmd_runner: Arc<dyn CommandRunner + Sync + Send>,
+    spawner: Arc<dyn HostapdSpawner + Sync + Send>,
+    querier: Arc<dyn HostapdStatusQuerier + Sync + Send>,
 }
 
-impl<'a> ActivationPipeline<'a> {
+impl ActivationPipeline {
     pub fn new(
-        nm_ops: &'a (dyn NetworkManagerOps + Sync),
-        nm_conn: &'a (dyn NetworkManagerConnectionOps + Sync),
-        cmd_runner: &'a (dyn CommandRunner + Sync),
-        spawner: &'a (dyn HostapdSpawner + Sync),
-        querier: &'a (dyn HostapdStatusQuerier + Sync),
+        nm_ops: Arc<dyn NetworkManagerOps + Sync + Send>,
+        nm_conn: Arc<dyn NetworkManagerConnectionOps + Sync + Send>,
+        cmd_runner: Arc<dyn CommandRunner + Sync + Send>,
+        spawner: Arc<dyn HostapdSpawner + Sync + Send>,
+        querier: Arc<dyn HostapdStatusQuerier + Sync + Send>,
     ) -> Self {
         Self {
             nm_ops,
@@ -71,7 +74,7 @@ impl<'a> ActivationPipeline<'a> {
     /// 6. Wait for AP up
     pub async fn activate(&self, config: &Config) -> Result<ActivationResult, ServiceError> {
         // 1. Check Wi-Fi state.
-        let wifi = get_wifi_state(self.nm_ops)
+        let wifi = get_wifi_state(self.nm_ops.as_ref())
             .await
             .map_err(|e| ServiceError::Network(e.to_string()))?;
 
@@ -86,7 +89,7 @@ impl<'a> ActivationPipeline<'a> {
         tracing::info!("Wi-Fi connected on {sta_interface}");
 
         // 2. Check AP+STA capability.
-        let capability = check_ap_sta_capability(self.cmd_runner)
+        let capability = check_ap_sta_capability(self.cmd_runner.as_ref())
             .await
             .map_err(|e| ServiceError::Network(e.to_string()))?;
 
@@ -104,7 +107,7 @@ impl<'a> ActivationPipeline<'a> {
         };
 
         let ap_result = activate_ap_sta(
-            self.nm_conn,
+            self.nm_conn.as_ref(),
             &config.ssid,
             &config.password,
             band_str,
@@ -128,7 +131,7 @@ impl<'a> ActivationPipeline<'a> {
         .map_err(|e| ServiceError::Hostapd(e.to_string()))?;
 
         // 5. Start hostapd.
-        let process = crate::ap::start_hostapd(&hostapd_config, self.spawner)
+        let process = crate::ap::start_hostapd(&hostapd_config, self.spawner.as_ref())
             .await
             .map_err(|e| ServiceError::Hostapd(e.to_string()))?;
 
@@ -136,11 +139,11 @@ impl<'a> ActivationPipeline<'a> {
 
         // 6. Wait for AP up via hostapd_cli status.
         let mut monitor = ApLifecycleMonitor::new(ap_interface);
-        let status = wait_for_ap_up(&process, self.querier, &mut monitor).await?;
+        let status = wait_for_ap_up(&process, self.querier.as_ref(), &mut monitor).await?;
 
         if !status.ap_is_up {
             // AP didn't come up — stop hostapd and clean up.
-            let _ = crate::ap::stop_hostapd(&process, self.spawner).await;
+            let _ = crate::ap::stop_hostapd(&process, self.spawner.as_ref()).await;
             return Err(ServiceError::Hostapd(
                 "hostapd started but AP did not come up".to_string(),
             ));
@@ -166,21 +169,21 @@ impl<'a> ActivationPipeline<'a> {
         active_connection_path: &str,
     ) -> Result<DeactivationResult, ServiceError> {
         // 1. Stop hostapd.
-        crate::ap::stop_hostapd(process, self.spawner)
+        crate::ap::stop_hostapd(process, self.spawner.as_ref())
             .await
             .map_err(|e| ServiceError::Hostapd(e.to_string()))?;
 
         tracing::info!("hostapd stopped");
 
         // 2. Tear down AP connection.
-        deactivate_ap_sta(self.nm_conn, active_connection_path)
+        deactivate_ap_sta(self.nm_conn.as_ref(), active_connection_path)
             .await
             .map_err(|e| ServiceError::Network(e.to_string()))?;
 
         tracing::info!("AP connection torn down");
 
         // 3. Verify STA connection still active.
-        let wifi = get_wifi_state(self.nm_ops)
+        let wifi = get_wifi_state(self.nm_ops.as_ref())
             .await
             .map_err(|e| ServiceError::Network(e.to_string()))?;
 
@@ -251,6 +254,8 @@ async fn wait_for_ap_up(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::ap::MockHostapdSpawner;
     use crate::ap::MockHostapdStatusQuerier;
     use crate::network::MockCommandRunner;
@@ -280,8 +285,8 @@ mod tests {
 
     #[tokio::test]
     async fn activate_full_pipeline() {
-        let nm = mock_wifi_connected("wlan0");
-        let nm_conn = MockNetworkManagerConnection::new();
+        let nm = Arc::new(mock_wifi_connected("wlan0"));
+        let nm_conn = Arc::new(MockNetworkManagerConnection::new());
         let mut cmd_runner = MockCommandRunner::new();
 
         // Mock iw list output with AP+STA support.
@@ -291,12 +296,12 @@ mod tests {
         "#;
         cmd_runner.add_output("iw", iw_output);
 
-        let spawner = MockHostapdSpawner::new();
-        let querier = MockHostapdStatusQuerier::new();
+        let spawner = Arc::new(MockHostapdSpawner::new());
+        let querier = Arc::new(MockHostapdStatusQuerier::new());
         querier.add_status_response("state=ENABLED\nssid=Reecho-test\n");
         querier.set_process_running(1000, true);
 
-        let pipeline = ActivationPipeline::new(&nm, &nm_conn, &cmd_runner, &spawner, &querier);
+        let pipeline = ActivationPipeline::new(nm, nm_conn, Arc::new(cmd_runner), spawner, querier);
         let config = test_config();
 
         let result = pipeline.activate(&config).await.unwrap();
@@ -306,13 +311,13 @@ mod tests {
 
     #[tokio::test]
     async fn activate_no_wifi_returns_error() {
-        let nm = MockNetworkManager::new(); // No devices
-        let nm_conn = MockNetworkManagerConnection::new();
-        let cmd_runner = MockCommandRunner::new();
-        let spawner = MockHostapdSpawner::new();
-        let querier = MockHostapdStatusQuerier::new();
+        let nm = Arc::new(MockNetworkManager::new()); // No devices
+        let nm_conn = Arc::new(MockNetworkManagerConnection::new());
+        let cmd_runner = Arc::new(MockCommandRunner::new());
+        let spawner = Arc::new(MockHostapdSpawner::new());
+        let querier = Arc::new(MockHostapdStatusQuerier::new());
 
-        let pipeline = ActivationPipeline::new(&nm, &nm_conn, &cmd_runner, &spawner, &querier);
+        let pipeline = ActivationPipeline::new(nm, nm_conn, cmd_runner, spawner, querier);
         let config = test_config();
 
         let result = pipeline.activate(&config).await;
@@ -325,8 +330,8 @@ mod tests {
 
     #[tokio::test]
     async fn activate_hostapd_timeout() {
-        let nm = mock_wifi_connected("wlan0");
-        let nm_conn = MockNetworkManagerConnection::new();
+        let nm = Arc::new(mock_wifi_connected("wlan0"));
+        let nm_conn = Arc::new(MockNetworkManagerConnection::new());
         let mut cmd_runner = MockCommandRunner::new();
 
         let iw_output = r#"Wiphy phy0
@@ -335,12 +340,12 @@ mod tests {
         "#;
         cmd_runner.add_output("iw", iw_output);
 
-        let spawner = MockHostapdSpawner::new();
-        let querier = MockHostapdStatusQuerier::new();
+        let spawner = Arc::new(MockHostapdSpawner::new());
+        let querier = Arc::new(MockHostapdStatusQuerier::new());
         // Process running but AP never comes up — empty status responses.
         querier.set_process_running(1000, true);
 
-        let pipeline = ActivationPipeline::new(&nm, &nm_conn, &cmd_runner, &spawner, &querier);
+        let pipeline = ActivationPipeline::new(nm, nm_conn, Arc::new(cmd_runner), spawner, querier);
         let config = test_config();
 
         // This will time out (30s). We use a short test by checking the error.
@@ -361,12 +366,13 @@ mod tests {
         nm.add_wifi_device("/dev/0", "wlan0");
         nm.add_active_connection("/active/0", 2, "/dev/0"); // state 2 = ACTIVATED
         nm.add_access_point("/dev/0", "/ap/0", "TestSSID", 80);
-        let nm_conn = MockNetworkManagerConnection::new();
-        let cmd_runner = MockCommandRunner::new();
-        let spawner = MockHostapdSpawner::new();
-        let querier = MockHostapdStatusQuerier::new();
+        let nm_conn = Arc::new(MockNetworkManagerConnection::new());
+        let cmd_runner = Arc::new(MockCommandRunner::new());
+        let spawner = Arc::new(MockHostapdSpawner::new());
+        let querier = Arc::new(MockHostapdStatusQuerier::new());
 
-        let pipeline = ActivationPipeline::new(&nm, &nm_conn, &cmd_runner, &spawner, &querier);
+        let pipeline =
+            ActivationPipeline::new(Arc::new(nm), nm_conn, cmd_runner, spawner.clone(), querier);
 
         // Simulate a running hostapd process.
         let config = HostapdConfig::new(
@@ -376,7 +382,9 @@ mod tests {
             reecho_shared::Band::Band5Ghz,
         )
         .unwrap();
-        let process = crate::ap::start_hostapd(&config, &spawner).await.unwrap();
+        let process = crate::ap::start_hostapd(&config, spawner.as_ref())
+            .await
+            .unwrap();
         assert!(spawner.is_running(process.pid).await);
 
         let result = pipeline.deactivate(&process, "/active/0").await.unwrap();
