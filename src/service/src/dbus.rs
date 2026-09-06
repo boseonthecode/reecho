@@ -262,6 +262,100 @@ impl ReechoService {
             .save()
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
+
+    /// Whether hotspot is active.
+    pub async fn is_active(&self) -> bool {
+        let g = self.inner.lock().await;
+        g.state == HotspotState::Active
+    }
+
+    /// Compute duration until next scheduled event, if any.
+    pub async fn next_schedule_delay(&self, is_active: bool) -> Option<std::time::Duration> {
+        let g = self.inner.lock().await;
+        let next = g.scheduler.next_event_time(is_active)?;
+        let now = crate::scheduler::now_epoch_secs();
+        if next <= now {
+            return Some(std::time::Duration::from_secs(0));
+        }
+        Some(std::time::Duration::from_secs(next - now))
+    }
+
+    /// Handle a scheduler tick: activate or deactivate if due.
+    pub async fn handle_schedule_tick(&self) {
+        let is_active = self.is_active().await;
+        let (on_time, off_time, enabled) = {
+            let g = self.inner.lock().await;
+            match g.scheduler.get_schedule() {
+                Some(e) => (e.on_time, e.off_time, e.enabled),
+                None => return,
+            }
+        };
+        if !enabled {
+            return;
+        }
+        if is_active {
+            tracing::info!("scheduler: auto-off triggered ({off_time})");
+            let _ = self.deactivate().await;
+        } else {
+            tracing::info!("scheduler: auto-on triggered ({on_time})");
+            let (ssid, password, band) = {
+                let g = self.inner.lock().await;
+                (
+                    g.config.ssid.clone(),
+                    g.config.password.clone(),
+                    g.config.band.to_string(),
+                )
+            };
+            let _ = self.activate(ssid, password, band).await;
+        }
+    }
+
+    /// Poll devices and enforce data limit (auto-deactivate + signal).
+    pub async fn poll_and_enforce(&self) {
+        if !self.is_active().await {
+            return;
+        }
+        self.poll_devices().await;
+
+        {
+            let iface = {
+                let g = self.inner.lock().await;
+                g.ap_interface.clone()
+            };
+            if let Some(iface) = iface {
+                if let Ok(content) = tokio::fs::read_to_string("/proc/net/dev").await {
+                    if let Some(c) = devices::parse_proc_net_dev(&content, &iface) {
+                        let mut g = self.inner.lock().await;
+                        g.data_tracker.update(c.rx_bytes, c.tx_bytes);
+                    }
+                }
+            }
+        }
+
+        let (action, conn) = {
+            let g = self.inner.lock().await;
+            (g.data_tracker.check(), g.connection.clone())
+        };
+
+        match action {
+            crate::limits::LimitAction::Exceeded => {
+                tracing::warn!("data limit exceeded — auto-deactivating");
+                if let Some(c) = &conn {
+                    let path = zbus::zvariant::ObjectPath::try_from(reecho_shared::DBUS_PATH)
+                        .unwrap()
+                        .into();
+                    let ctxt = SignalContext::from_parts(c.clone(), path);
+                    let _ = Self::data_limit_reached(&ctxt).await;
+                }
+                let _ = self.deactivate().await;
+            }
+            crate::limits::LimitAction::Approaching { percentage } => {
+                tracing::warn!("data limit approaching: {percentage:.1}%");
+                Self::emit_warning(&conn, &format!("data limit {percentage:.1}% used")).await;
+            }
+            crate::limits::LimitAction::None => {}
+        }
+    }
 }
 
 #[zbus::interface(name = "org.reecho.Service")]

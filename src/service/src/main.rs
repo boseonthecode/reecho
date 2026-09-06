@@ -62,6 +62,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Reecho service ready on {DBUS_NAME}");
 
+    let sched_svc = service.clone();
+    tokio::spawn(async move {
+        loop {
+            let is_active = sched_svc.is_active().await;
+            let delay = sched_svc.next_schedule_delay(is_active).await;
+            match delay {
+                Some(d) => {
+                    tracing::debug!("scheduler sleep for {d:?} (is_active={is_active})");
+                    tokio::time::sleep(d).await;
+                    sched_svc.handle_schedule_tick().await;
+                }
+                None => tokio::time::sleep(std::time::Duration::from_secs(60)).await,
+            }
+        }
+    });
+
+    let poll_svc = service.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            poll_svc.poll_and_enforce().await;
+        }
+    });
+
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutting down");
 
